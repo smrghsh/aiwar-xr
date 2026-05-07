@@ -1,8 +1,12 @@
 import * as THREE from "three";
+import Papa from "papaparse";
 import Experience from "../Experience.js";
 import Environment from "./Environment.js";
 import Floor from "./Floor.js";
 import Tooltip from "./Tooltip.js";
+
+const CSV_PATH = "./data/aiwarcloud-table.csv";
+
 export default class World {
   constructor() {
     this.experience = new Experience();
@@ -96,6 +100,8 @@ export default class World {
       // this.scene.add(new THREE.AxesHelper()); // Add axes helper for debugging
       this.environment = new Environment();
       this.tooltip = new Tooltip();
+      this.records = new Map();
+      this.loadRecords();
       this.ready = true;
 
       // place a 16x9 plane on the floor
@@ -173,6 +179,30 @@ export default class World {
     return (
       window.networkGroup || this.scene.getObjectByName("NetworkVisualization")
     );
+  }
+
+  async loadRecords() {
+    try {
+      const response = await fetch(CSV_PATH);
+      const text = (await response.text()).replace(/^﻿/, "");
+      const parsed = Papa.parse(text, {
+        header: true,
+        skipEmptyLines: true,
+        dynamicTyping: true,
+      });
+      for (const row of parsed.data) {
+        const key = row.Weapon && String(row.Weapon).trim();
+        if (key) this.records.set(key, row);
+      }
+      console.log(`Loaded ${this.records.size} aiwar records`);
+    } catch (err) {
+      console.error("Failed to load aiwar CSV:", err);
+    }
+  }
+
+  lookupRecord(name) {
+    if (!name || !this.records) return null;
+    return this.records.get(String(name).trim()) || null;
   }
 
   update() {

@@ -30,6 +30,7 @@
     "get-pixels": "^3.3.3",
     "lil-gui": "^0.17.0",
     "meshline": "^3.3.1",
+    "papaparse": "^5.5.3",
     "pbf": "^3.1.0",
     "regenerator": "^0.14.2",
     "stats.js": "^0.17.0",

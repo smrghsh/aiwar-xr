@@ -5450,6 +5450,7 @@ const ui = {
         }
         obj.userData.networkNode = true;
         obj.userData.nodeId = node.id;
+        obj.userData.nodeName = node.name;
         // Child object: Text sprite (optional)
         if (state.showNodeLabels && node.label !== "") {
           const sprite = createTextSpriteObject(
