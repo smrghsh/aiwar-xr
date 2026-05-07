@@ -48,6 +48,10 @@ export default class Experience {
     this.world = new World();
     this.statsPanels = new StatsPanels();
 
+    if (this.debug.active) {
+      this.debug.ui.close();
+    }
+
     this.clock = new THREE.Clock();
     this.clock.start();
 
