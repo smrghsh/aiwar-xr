@@ -122,18 +122,42 @@ export default class Experience {
     }
     if (!didCast) return;
 
+    let nodeHit = null;
+
     const hits = this.raycaster.intersectObject(networkGroup, true);
-    if (hits.length === 0) {
+    if (hits.length > 0) {
+      let n = hits[0].object;
+      while (n && !n.userData?.networkNode && n.parent) n = n.parent;
+      if (n && n.userData?.networkNode) nodeHit = n;
+    }
+
+    if (!nodeHit) {
+      const ray = this.raycaster.ray;
+      const angularThreshold = Math.tan(THREE.MathUtils.degToRad(0.7));
+      let bestDist = Infinity;
+      const tmp = this._nodeWorldPos;
+      networkGroup.traverse((obj) => {
+        if (!obj.userData?.networkNode) return;
+        obj.getWorldPosition(tmp);
+        const toPoint = tmp.clone().sub(ray.origin);
+        const t = toPoint.dot(ray.direction);
+        if (t <= 0) return;
+        const closest = ray.origin
+          .clone()
+          .add(ray.direction.clone().multiplyScalar(t));
+        const perpDist = closest.distanceTo(tmp);
+        if (perpDist < angularThreshold * t && perpDist < bestDist) {
+          bestDist = perpDist;
+          nodeHit = obj;
+        }
+      });
+    }
+
+    if (!nodeHit) {
       tooltip.hide();
       return;
     }
-    let node = hits[0].object;
-    while (node && node.parent !== networkGroup) node = node.parent;
-    if (!node) {
-      tooltip.hide();
-      return;
-    }
-    node.getWorldPosition(this._nodeWorldPos);
+    nodeHit.getWorldPosition(this._nodeWorldPos);
     tooltip.showAt(this._nodeWorldPos);
   }
 
