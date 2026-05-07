@@ -2,6 +2,7 @@ import * as THREE from "three";
 import Experience from "../Experience.js";
 import Environment from "./Environment.js";
 import Floor from "./Floor.js";
+import Tooltip from "./Tooltip.js";
 export default class World {
   constructor() {
     this.experience = new Experience();
@@ -94,6 +95,7 @@ export default class World {
       this.floor = new Floor();
       // this.scene.add(new THREE.AxesHelper()); // Add axes helper for debugging
       this.environment = new Environment();
+      this.tooltip = new Tooltip();
       this.ready = true;
 
       // place a 16x9 plane on the floor

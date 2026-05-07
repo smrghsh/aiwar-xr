@@ -5,6 +5,18 @@ import Experience from "./Experience/Experience.js";
 const experience = new Experience();
 var scene = experience.scene;
 
+const _yBillboardWorldPos = new THREE.Vector3();
+const _yBillboardTarget = new THREE.Vector3();
+function yBillboardOnBeforeRender(_renderer, _scene, camera) {
+  this.getWorldPosition(_yBillboardWorldPos);
+  _yBillboardTarget.set(
+    camera.position.x,
+    _yBillboardWorldPos.y,
+    camera.position.z
+  );
+  this.lookAt(_yBillboardTarget);
+}
+
 // Global references for Experience integration
 window.networkGroup = null;
 
@@ -5351,17 +5363,20 @@ const ui = {
               factor1 = width / size,
               factor2 = height / size,
               largerFactor = factor1 > factor2 ? factor1 : factor2;
-            const imageMaterial = new THREE.SpriteMaterial({
+            const imageMaterial = new THREE.MeshBasicMaterial({
               map: imageTexture,
+              transparent: true,
+              depthWrite: false,
+              side: THREE.DoubleSide,
             });
             state.threeObjects.trackMaterial(id + "image", imageMaterial);
-            const imageSprite = new THREE.Sprite(imageMaterial);
-            imageSprite.scale.set(
-              width / largerFactor,
-              height / largerFactor,
-              1
-            );
-            obj.add(imageSprite);
+            const planeWidth = width / largerFactor;
+            const planeHeight = height / largerFactor;
+            const planeGeo = new THREE.PlaneGeometry(planeWidth, planeHeight);
+            state.threeObjects.trackGeometry(id + "imagePlane", planeGeo);
+            const imageBillboard = new THREE.Mesh(planeGeo, imageMaterial);
+            imageBillboard.onBeforeRender = yBillboardOnBeforeRender;
+            obj.add(imageBillboard);
           }
           const imageTexture = new THREE.TextureLoader().load(
             image,
@@ -5399,24 +5414,26 @@ const ui = {
           }
           context.fillStyle = fontColor;
           context.fillText(text, 0, fontSize);
-          // Canvas to sprite
+          // Canvas to plane mesh (Y-axis billboard)
           const texture = new THREE.Texture(canvas);
           state.threeObjects.trackTexture(id + "text", texture);
           texture.minFilter = THREE.LinearFilter;
           texture.needsUpdate = true;
-          const spriteMaterial = new THREE.SpriteMaterial({
-              map: texture,
-              depthWrite: false,
-            }),
-            sprite = new THREE.Sprite(spriteMaterial),
-            sizeCorrectionFactor = 0.1;
-          state.threeObjects.trackMaterial(id + "text", spriteMaterial);
-          sprite.scale.set(
-            exactWidth * sizeCorrectionFactor,
-            approxHeight * sizeCorrectionFactor,
-            1
-          );
-          return sprite;
+          const planeMaterial = new THREE.MeshBasicMaterial({
+            map: texture,
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          state.threeObjects.trackMaterial(id + "text", planeMaterial);
+          const sizeCorrectionFactor = 0.1;
+          const planeWidth = exactWidth * sizeCorrectionFactor;
+          const planeHeight = approxHeight * sizeCorrectionFactor;
+          const planeGeo = new THREE.PlaneGeometry(planeWidth, planeHeight);
+          state.threeObjects.trackGeometry(id + "textPlane", planeGeo);
+          const labelBillboard = new THREE.Mesh(planeGeo, planeMaterial);
+          labelBillboard.onBeforeRender = yBillboardOnBeforeRender;
+          return labelBillboard;
         }
         // Parent object: Image or geometric object
         if (state.showNodeImages && typeof node.image !== "undefined") {

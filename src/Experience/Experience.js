@@ -67,6 +67,13 @@ export default class Experience {
 
     this.controller = new Controller();
 
+    this.raycaster = new THREE.Raycaster();
+    this._rayMatrix = new THREE.Matrix4();
+    this._rayOrigin = new THREE.Vector3();
+    this._rayDir = new THREE.Vector3();
+    this._nodeWorldPos = new THREE.Vector3();
+    this.INTERSECTED = null;
+
     this.renderer.instance.setAnimationLoop(() => {
       this.statsPanels.begin();
       this.world.update();
@@ -76,12 +83,11 @@ export default class Experience {
         window.updateNetworkVisualization();
       }
 
+      this.updateTooltipRaycast();
+
       this.renderer.instance.render(this.scene, this.camera.instance);
       this.statsPanels.end();
     });
-
-    this.raycaster = new THREE.Raycaster();
-    this.INTERSECTED = null;
 
     this.sizes.on("resize", () => {
       this.resize();
@@ -92,6 +98,43 @@ export default class Experience {
 
   isXRActive() {
     return this.renderer.instance.xr.isPresenting;
+  }
+
+  updateTooltipRaycast() {
+    const tooltip = this.world?.tooltip;
+    const networkGroup = window.networkGroup;
+    if (!tooltip || !networkGroup) return;
+
+    let didCast = false;
+    if (this.isXRActive()) {
+      const xrController =
+        this.controller?.rightController || this.controller?.controller1;
+      if (xrController) {
+        this._rayMatrix.identity().extractRotation(xrController.matrixWorld);
+        this._rayOrigin.setFromMatrixPosition(xrController.matrixWorld);
+        this._rayDir.set(0, 0, -1).applyMatrix4(this._rayMatrix);
+        this.raycaster.set(this._rayOrigin, this._rayDir);
+        didCast = true;
+      }
+    } else if (this.mouse) {
+      this.raycaster.setFromCamera(this.mouse, this.camera.instance);
+      didCast = true;
+    }
+    if (!didCast) return;
+
+    const hits = this.raycaster.intersectObject(networkGroup, true);
+    if (hits.length === 0) {
+      tooltip.hide();
+      return;
+    }
+    let node = hits[0].object;
+    while (node && node.parent !== networkGroup) node = node.parent;
+    if (!node) {
+      tooltip.hide();
+      return;
+    }
+    node.getWorldPosition(this._nodeWorldPos);
+    tooltip.showAt(this._nodeWorldPos);
   }
 
   resize() {
