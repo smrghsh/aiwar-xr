@@ -1,0 +1,11 @@
+
+/.quarto/
+/assets
+*.vdoc.py
+*.otf
+/nodem
+
+node_modules/
+.vscode/
+.DS_STORE
+Frames
