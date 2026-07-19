@@ -33131,6 +33131,165 @@ class World {
     }
   }
 }
+const STYLE = `
+.aiwar-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10000;
+  max-height: 60vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: #ffffff;
+  color: #111111;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  border-radius: 14px 14px 0 0;
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.35);
+  padding: 16px 18px calc(16px + env(safe-area-inset-bottom));
+  transform: translateY(105%);
+  transition: transform 0.25s ease;
+}
+.aiwar-sheet.aiwar-sheet--open {
+  transform: translateY(0);
+}
+.aiwar-sheet__close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  border: none;
+  background: #eeeeee;
+  color: #333333;
+  font-size: 16px;
+  line-height: 1;
+  width: 32px;
+  height: 32px;
+  border-radius: 16px;
+}
+.aiwar-sheet__title {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0 36px 2px 0;
+}
+.aiwar-sheet__meta {
+  color: #555555;
+  margin-bottom: 8px;
+}
+.aiwar-sheet__section {
+  color: #666666;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  margin: 14px 0 4px;
+  border-top: 1px solid #dddddd;
+  padding-top: 10px;
+}
+.aiwar-sheet__field {
+  margin: 4px 0;
+}
+.aiwar-sheet__label {
+  font-weight: 700;
+}
+.aiwar-sheet a {
+  color: #1a56b0;
+}
+`;
+class MobilePanel {
+  constructor() {
+    const style = document.createElement("style");
+    style.textContent = STYLE;
+    document.head.appendChild(style);
+    this.element = document.createElement("div");
+    this.element.className = "aiwar-sheet";
+    document.body.appendChild(this.element);
+    this.closeButton = document.createElement("button");
+    this.closeButton.className = "aiwar-sheet__close";
+    this.closeButton.textContent = "✕";
+    this.closeButton.addEventListener("click", () => this.hide());
+  }
+  _append(parent, tag, className, text) {
+    const el = document.createElement(tag);
+    if (className) el.className = className;
+    if (text) el.textContent = text;
+    parent.appendChild(el);
+    return el;
+  }
+  _appendField(parent, label2, value) {
+    if (!value) return;
+    const field = this._append(parent, "div", "aiwar-sheet__field");
+    this._append(field, "span", "aiwar-sheet__label", `${label2}: `);
+    this._append(field, "span", "", value);
+  }
+  render(data) {
+    const node = (data == null ? void 0 : data.node) || null;
+    const record = (data == null ? void 0 : data.record) || null;
+    this.element.replaceChildren(this.closeButton);
+    const title = cleanValue(node == null ? void 0 : node.name) || cleanValue(record == null ? void 0 : record.Weapon) || cleanValue(data == null ? void 0 : data.name) || "(unknown)";
+    this._append(this.element, "div", "aiwar-sheet__title", title);
+    const metaParts = [
+      cleanValue(node == null ? void 0 : node.year),
+      cleanValue(node == null ? void 0 : node.currentStatus)
+    ].filter(Boolean);
+    if (metaParts.length) {
+      this._append(
+        this.element,
+        "div",
+        "aiwar-sheet__meta",
+        metaParts.join("  ·  ")
+      );
+    }
+    if (node) {
+      for (const [key, label2] of NODE_FIELDS) {
+        this._appendField(this.element, label2, cleanValue(node[key]));
+      }
+    }
+    if (record) {
+      this._append(
+        this.element,
+        "div",
+        "aiwar-sheet__section",
+        "AI WAR CLOUD DATABASE"
+      );
+      const developed = cleanValue(record.Developed);
+      if (developed && developed !== cleanValue(node == null ? void 0 : node.year)) {
+        this._appendField(this.element, "Developed", developed);
+      }
+      for (const [key, label2] of RECORD_FIELDS) {
+        this._appendField(this.element, label2, cleanValue(record[key]));
+      }
+      const source = cleanValue(record.Source);
+      const sourceType = cleanValue(record.SourceType);
+      const sourceText = source && sourceType ? `${source} (${sourceType})` : source || sourceType;
+      const url = cleanValue(record.URL);
+      if (sourceText) {
+        const field = this._append(this.element, "div", "aiwar-sheet__field");
+        this._append(field, "span", "aiwar-sheet__label", "Source: ");
+        if (/^https?:\/\//.test(url)) {
+          const link = this._append(field, "a", "", `${sourceText} ↗`);
+          link.href = url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+        } else {
+          this._append(field, "span", "", sourceText);
+        }
+      }
+    }
+    const connections = Array.isArray(data == null ? void 0 : data.connections) ? data.connections : null;
+    if (connections == null ? void 0 : connections.length) {
+      this._append(this.element, "div", "aiwar-sheet__section", "CONNECTIONS");
+      for (const group of connections) {
+        this._appendField(this.element, group.label, group.names.join(", "));
+      }
+    }
+    this.element.scrollTop = 0;
+    this.element.classList.add("aiwar-sheet--open");
+  }
+  hide() {
+    this.element.classList.remove("aiwar-sheet--open");
+  }
+}
 const sources = [
   {
     name: "butterflyTexture",
@@ -33402,6 +33561,7 @@ class CustomStats {
 let instance$1 = null;
 class Experience {
   constructor(canvas) {
+    var _a2, _b2;
     if (instance$1) {
       return instance$1;
     }
@@ -33429,8 +33589,16 @@ class Experience {
     this.debug = new Debug();
     this.world = new World();
     this.statsPanels = new CustomStats();
+    this.mobileMode = ((_b2 = (_a2 = window.matchMedia) == null ? void 0 : _a2.call(window, "(pointer: coarse)")) == null ? void 0 : _b2.matches) ?? false;
+    if (this.mobileMode) {
+      this.mobilePanel = new MobilePanel();
+      this.setupTapSelect();
+    }
     if (this.debug.active) {
       this.debug.ui.close();
+      if (this.mobileMode) {
+        this.debug.ui.hide();
+      }
     }
     this.clock = new Clock();
     this.clock.start();
@@ -33452,10 +33620,12 @@ class Experience {
       this.statsPanels.begin();
       this.world.update();
       this.controller.update();
-      if (window.updateNetworkVisualization) {
+      if (window.updateNetworkVisualization && this.shouldTickNetwork()) {
         window.updateNetworkVisualization();
       }
-      this.updateTooltipRaycast();
+      if (this.isXRActive() || !this.mobileMode) {
+        this.updateTooltipRaycast();
+      }
       this.renderer.instance.render(this.scene, this.camera.instance);
       this.statsPanels.end();
     });
@@ -33468,32 +33638,53 @@ class Experience {
   isXRActive() {
     return this.renderer.instance.xr.isPresenting;
   }
-  updateTooltipRaycast() {
-    var _a2, _b2, _c, _d, _e, _f, _g, _h;
-    const tooltip = (_a2 = this.world) == null ? void 0 : _a2.tooltip;
-    const networkGroup = window.networkGroup;
-    if (!tooltip || !networkGroup) return;
-    let didCast = false;
-    if (this.isXRActive()) {
-      const xrController = ((_b2 = this.controller) == null ? void 0 : _b2.rightController) || ((_c = this.controller) == null ? void 0 : _c.controller1);
-      if (xrController) {
-        this._rayMatrix.identity().extractRotation(xrController.matrixWorld);
-        this._rayOrigin.setFromMatrixPosition(xrController.matrixWorld);
-        this._rayDir.set(0, 0, -1).applyMatrix4(this._rayMatrix);
-        this.raycaster.set(this._rayOrigin, this._rayDir);
-        didCast = true;
-      }
-    } else if (this.mouse) {
+  // On mobile (outside XR) let the force layout settle, then stop ticking
+  // the simulation to save battery. XR and desktop always tick.
+  shouldTickNetwork() {
+    if (!this.mobileMode || this.isXRActive()) return true;
+    this._networkTickFrames = (this._networkTickFrames || 0) + 1;
+    return this._networkTickFrames < 900;
+  }
+  setupTapSelect() {
+    window.addEventListener("pointerdown", (event) => {
+      if (event.target !== this.canvas) return;
+      this._tapStart = {
+        x: event.clientX,
+        y: event.clientY,
+        time: performance.now()
+      };
+    });
+    window.addEventListener("pointerup", (event) => {
+      const start = this._tapStart;
+      this._tapStart = null;
+      if (!start || event.target !== this.canvas || this.isXRActive()) return;
+      const moved = Math.hypot(
+        event.clientX - start.x,
+        event.clientY - start.y
+      );
+      if (moved > 12 || performance.now() - start.time > 500) return;
+      this.mouse.x = event.clientX / window.innerWidth * 2 - 1;
+      this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
       this.raycaster.setFromCamera(this.mouse, this.camera.instance);
-      didCast = true;
-    }
-    if (!didCast) return;
+      const nodeHit = this.pickNode();
+      if (nodeHit) {
+        this.mobilePanel.render(this.assembleNodeData(nodeHit));
+      } else {
+        this.mobilePanel.hide();
+      }
+    });
+  }
+  // Uses this.raycaster as already configured by the caller
+  pickNode() {
+    var _a2, _b2;
+    const networkGroup = window.networkGroup;
+    if (!networkGroup) return null;
     let nodeHit = null;
     const hits = this.raycaster.intersectObject(networkGroup, true);
     if (hits.length > 0) {
       let n2 = hits[0].object;
-      while (n2 && !((_d = n2.userData) == null ? void 0 : _d.networkNode) && n2.parent) n2 = n2.parent;
-      if (n2 && ((_e = n2.userData) == null ? void 0 : _e.networkNode)) nodeHit = n2;
+      while (n2 && !((_a2 = n2.userData) == null ? void 0 : _a2.networkNode) && n2.parent) n2 = n2.parent;
+      if (n2 && ((_b2 = n2.userData) == null ? void 0 : _b2.networkNode)) nodeHit = n2;
     }
     if (!nodeHit) {
       const ray = this.raycaster.ray;
@@ -33515,17 +33706,45 @@ class Experience {
         }
       });
     }
+    return nodeHit;
+  }
+  assembleNodeData(nodeHit) {
+    var _a2, _b2, _c;
+    const name = (_a2 = nodeHit.userData) == null ? void 0 : _a2.nodeName;
+    const id2 = (_b2 = nodeHit.userData) == null ? void 0 : _b2.nodeId;
+    const node = ((_c = nodeHit.userData) == null ? void 0 : _c.nodeData) || null;
+    const record = this.world.lookupRecord(name, id2);
+    const connections = this.world.getConnections(id2);
+    return { node, record, name, id: id2, connections };
+  }
+  updateTooltipRaycast() {
+    var _a2, _b2, _c;
+    const tooltip = (_a2 = this.world) == null ? void 0 : _a2.tooltip;
+    const networkGroup = window.networkGroup;
+    if (!tooltip || !networkGroup) return;
+    let didCast = false;
+    if (this.isXRActive()) {
+      const xrController = ((_b2 = this.controller) == null ? void 0 : _b2.rightController) || ((_c = this.controller) == null ? void 0 : _c.controller1);
+      if (xrController) {
+        this._rayMatrix.identity().extractRotation(xrController.matrixWorld);
+        this._rayOrigin.setFromMatrixPosition(xrController.matrixWorld);
+        this._rayDir.set(0, 0, -1).applyMatrix4(this._rayMatrix);
+        this.raycaster.set(this._rayOrigin, this._rayDir);
+        didCast = true;
+      }
+    } else if (this.mouse) {
+      this.raycaster.setFromCamera(this.mouse, this.camera.instance);
+      didCast = true;
+    }
+    if (!didCast) return;
+    const nodeHit = this.pickNode();
     if (!nodeHit) {
       tooltip.hide();
       return;
     }
     nodeHit.getWorldPosition(this._nodeWorldPos);
-    const name = (_f = nodeHit.userData) == null ? void 0 : _f.nodeName;
-    const id2 = (_g = nodeHit.userData) == null ? void 0 : _g.nodeId;
-    const node = ((_h = nodeHit.userData) == null ? void 0 : _h.nodeData) || null;
-    const record = this.world.lookupRecord(name, id2);
-    const connections = this.world.getConnections(id2);
-    tooltip.render({ node, record, name, connections }, id2 || name);
+    const data = this.assembleNodeData(nodeHit);
+    tooltip.render(data, data.id || data.name);
     tooltip.showAt(this._nodeWorldPos);
   }
   resize() {
@@ -81687,4 +81906,4 @@ window.addEventListener("unload", function() {
   state.threeObjects.disposeAll();
 });
 app.start();
-//# sourceMappingURL=index-Dopym-8H.js.map
+//# sourceMappingURL=index-CVJdqU0n.js.map

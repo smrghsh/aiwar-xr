@@ -11,6 +11,7 @@ import Mouse from "./Utils/Mouse.js";
 import Camera from "./Camera.js";
 import Renderer from "./Renderer.js";
 import World from "./World/World.js";
+import MobilePanel from "./World/MobilePanel.js";
 import sources from "./sources.js";
 import { VRButton } from "three/examples/jsm/webxr/VRButton.js";
 import StatsPanels from "./Utils/StatsPanels.js";
@@ -48,8 +49,19 @@ export default class Experience {
     this.world = new World();
     this.statsPanels = new StatsPanels();
 
+    // Touch devices get tap-to-select + a DOM bottom sheet; XR and desktop
+    // keep the world-space hover tooltip untouched.
+    this.mobileMode = window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
+    if (this.mobileMode) {
+      this.mobilePanel = new MobilePanel();
+      this.setupTapSelect();
+    }
+
     if (this.debug.active) {
       this.debug.ui.close();
+      if (this.mobileMode) {
+        this.debug.ui.hide();
+      }
     }
 
     this.clock = new THREE.Clock();
@@ -79,11 +91,13 @@ export default class Experience {
       this.world.update();
       this.controller.update();
 
-      if (window.updateNetworkVisualization) {
+      if (window.updateNetworkVisualization && this.shouldTickNetwork()) {
         window.updateNetworkVisualization();
       }
 
-      this.updateTooltipRaycast();
+      if (this.isXRActive() || !this.mobileMode) {
+        this.updateTooltipRaycast();
+      }
 
       this.renderer.instance.render(this.scene, this.camera.instance);
       this.statsPanels.end();
@@ -100,28 +114,49 @@ export default class Experience {
     return this.renderer.instance.xr.isPresenting;
   }
 
-  updateTooltipRaycast() {
-    const tooltip = this.world?.tooltip;
-    const networkGroup = window.networkGroup;
-    if (!tooltip || !networkGroup) return;
+  // On mobile (outside XR) let the force layout settle, then stop ticking
+  // the simulation to save battery. XR and desktop always tick.
+  shouldTickNetwork() {
+    if (!this.mobileMode || this.isXRActive()) return true;
+    this._networkTickFrames = (this._networkTickFrames || 0) + 1;
+    return this._networkTickFrames < 900;
+  }
 
-    let didCast = false;
-    if (this.isXRActive()) {
-      const xrController =
-        this.controller?.rightController || this.controller?.controller1;
-      if (xrController) {
-        this._rayMatrix.identity().extractRotation(xrController.matrixWorld);
-        this._rayOrigin.setFromMatrixPosition(xrController.matrixWorld);
-        this._rayDir.set(0, 0, -1).applyMatrix4(this._rayMatrix);
-        this.raycaster.set(this._rayOrigin, this._rayDir);
-        didCast = true;
-      }
-    } else if (this.mouse) {
+  setupTapSelect() {
+    window.addEventListener("pointerdown", (event) => {
+      if (event.target !== this.canvas) return;
+      this._tapStart = {
+        x: event.clientX,
+        y: event.clientY,
+        time: performance.now(),
+      };
+    });
+    window.addEventListener("pointerup", (event) => {
+      const start = this._tapStart;
+      this._tapStart = null;
+      if (!start || event.target !== this.canvas || this.isXRActive()) return;
+      const moved = Math.hypot(
+        event.clientX - start.x,
+        event.clientY - start.y
+      );
+      if (moved > 12 || performance.now() - start.time > 500) return;
+
+      this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+      this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
       this.raycaster.setFromCamera(this.mouse, this.camera.instance);
-      didCast = true;
-    }
-    if (!didCast) return;
+      const nodeHit = this.pickNode();
+      if (nodeHit) {
+        this.mobilePanel.render(this.assembleNodeData(nodeHit));
+      } else {
+        this.mobilePanel.hide();
+      }
+    });
+  }
 
+  // Uses this.raycaster as already configured by the caller
+  pickNode() {
+    const networkGroup = window.networkGroup;
+    if (!networkGroup) return null;
     let nodeHit = null;
 
     const hits = this.raycaster.intersectObject(networkGroup, true);
@@ -152,18 +187,48 @@ export default class Experience {
         }
       });
     }
+    return nodeHit;
+  }
 
-    if (!nodeHit) {
-      tooltip.hide();
-      return;
-    }
-    nodeHit.getWorldPosition(this._nodeWorldPos);
+  assembleNodeData(nodeHit) {
     const name = nodeHit.userData?.nodeName;
     const id = nodeHit.userData?.nodeId;
     const node = nodeHit.userData?.nodeData || null;
     const record = this.world.lookupRecord(name, id);
     const connections = this.world.getConnections(id);
-    tooltip.render({ node, record, name, connections }, id || name);
+    return { node, record, name, id, connections };
+  }
+
+  updateTooltipRaycast() {
+    const tooltip = this.world?.tooltip;
+    const networkGroup = window.networkGroup;
+    if (!tooltip || !networkGroup) return;
+
+    let didCast = false;
+    if (this.isXRActive()) {
+      const xrController =
+        this.controller?.rightController || this.controller?.controller1;
+      if (xrController) {
+        this._rayMatrix.identity().extractRotation(xrController.matrixWorld);
+        this._rayOrigin.setFromMatrixPosition(xrController.matrixWorld);
+        this._rayDir.set(0, 0, -1).applyMatrix4(this._rayMatrix);
+        this.raycaster.set(this._rayOrigin, this._rayDir);
+        didCast = true;
+      }
+    } else if (this.mouse) {
+      this.raycaster.setFromCamera(this.mouse, this.camera.instance);
+      didCast = true;
+    }
+    if (!didCast) return;
+
+    const nodeHit = this.pickNode();
+    if (!nodeHit) {
+      tooltip.hide();
+      return;
+    }
+    nodeHit.getWorldPosition(this._nodeWorldPos);
+    const data = this.assembleNodeData(nodeHit);
+    tooltip.render(data, data.id || data.name);
     tooltip.showAt(this._nodeWorldPos);
   }
 

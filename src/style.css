@@ -28,6 +28,18 @@ body
   position: absolute;
   z-index: 0;
 }
+
+/* Touch devices: gestures go to the graph, not the page */
+@media (pointer: coarse) {
+  html,
+  body {
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  .webgl {
+    touch-action: none;
+  }
+}
 #settings {
   width: 100vw;
   text-align: center;

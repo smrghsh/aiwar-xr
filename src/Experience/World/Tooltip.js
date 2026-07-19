@@ -21,7 +21,8 @@ const LABEL_COLUMN = 240;
 const MAX_FIELD_LINES = 5;
 
 // Graph node metadata (from aiwc.ods via the embedded gravis export)
-const NODE_FIELDS = [
+// Shared with MobilePanel.js
+export const NODE_FIELDS = [
   ["type", "Type"],
   ["airo:type", "Role"],
   ["MLTask", "ML Task"],
@@ -40,14 +41,14 @@ const NODE_FIELDS = [
 ];
 
 // Prose columns from aiwarcloud-table.csv
-const RECORD_FIELDS = [
+export const RECORD_FIELDS = [
   ["Used By", "Used By"],
   ["Military Purpose", "Military Purpose"],
   ["Type of Tech", "Type of Tech"],
   ["Repurpose (Potential/Actual)", "Repurpose"],
 ];
 
-function cleanValue(value) {
+export function cleanValue(value) {
   if (value === undefined || value === null) return "";
   if (typeof value === "number" && !Number.isFinite(value)) return "";
   const text = String(value)
