@@ -4,8 +4,60 @@ import Experience from "../Experience.js";
 import Environment from "./Environment.js";
 import Floor from "./Floor.js";
 import Tooltip from "./Tooltip.js";
+import { buildRecordIndex, findRecord } from "./recordIndex.js";
 
 const CSV_PATH = "./data/aiwarcloud-table.csv";
+
+// Edge labels are active voice: "source <label> target" (e.g. Niantic
+// -developed-> LargeGeospatialModels). Display phrasing per direction:
+const OUTGOING_LABELS = {
+  developed: "Developed",
+  employed: "Employs",
+  "proposed relationship": "Proposed use of",
+  CEO: "CEO of",
+  founder: "Founder of",
+  employee: "Employee of",
+  investor: "Investor in",
+  owner: "Owner of",
+  "prospective owner": "Prospective owner of",
+  "former partner": "Former partner of",
+  "unit vetran": "Unit veteran of",
+};
+const INCOMING_LABELS = {
+  developed: "Developed by",
+  employed: "Employed by",
+  "proposed relationship": "Proposed use by",
+  "used in": "Deployment site of",
+  "based in": "Home of",
+  CEO: "CEO",
+  founder: "Founded by",
+  employee: "Employees",
+  investor: "Investors",
+  owner: "Owned by",
+  "prospective owner": "Prospective owner",
+  "former partner": "Former partner",
+  "unit vetran": "Unit veterans",
+  owns: "Owned by",
+  "invested in": "Investment from",
+  "invests in": "Investment from",
+  "part of": "Includes",
+  "member of": "Members",
+  purchased: "Purchased by",
+  "sold to": "Acquired",
+  contracts: "Contracted by",
+  incorporates: "Incorporated into",
+  "based on": "Basis of",
+  "relies on": "Relied on by",
+  "provides data to": "Data from",
+  "partners with": "Partners with",
+  affiliated: "Affiliated",
+  similar: "Similar",
+};
+const MAX_CONNECTION_NAMES = 8;
+
+function capitalize(text) {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
 
 export default class World {
   constructor() {
@@ -190,19 +242,58 @@ export default class World {
         skipEmptyLines: true,
         dynamicTyping: true,
       });
-      for (const row of parsed.data) {
-        const key = row.Weapon && String(row.Weapon).trim();
-        if (key) this.records.set(key, row);
-      }
-      console.log(`Loaded ${this.records.size} aiwar records`);
+      this.records = buildRecordIndex(parsed.data);
+      console.log(`Loaded ${this.records.size} aiwar record keys`);
     } catch (err) {
       console.error("Failed to load aiwar CSV:", err);
     }
   }
 
-  lookupRecord(name) {
-    if (!name || !this.records) return null;
-    return this.records.get(String(name).trim()) || null;
+  lookupRecord(name, id) {
+    return findRecord(this.records, name, id);
+  }
+
+  getConnections(id) {
+    const graph = window.aiwarGraph;
+    if (!id || !graph?.edges?.length || !graph?.nodes?.length) return null;
+    if (this._connectionsGraph !== graph) {
+      this._connectionsGraph = graph;
+      this._connectionsCache = new Map();
+      this._nodeNames = new Map(
+        graph.nodes.map((node) => [node.id, node.name || node.id])
+      );
+    }
+    if (this._connectionsCache.has(id)) return this._connectionsCache.get(id);
+
+    const idOf = (ref) => (ref && typeof ref === "object" ? ref.id : ref);
+    const groups = new Map();
+    const addTo = (label, otherId) => {
+      if (!groups.has(label)) groups.set(label, []);
+      groups.get(label).push(this._nodeNames.get(otherId) || otherId);
+    };
+    for (const edge of graph.edges) {
+      const source = idOf(edge.source);
+      const target = idOf(edge.target);
+      const label = edge.label || "connected to";
+      if (source === id) {
+        addTo(OUTGOING_LABELS[label] || capitalize(label), target);
+      } else if (target === id) {
+        addTo(INCOMING_LABELS[label] || `← ${capitalize(label)}`, source);
+      }
+    }
+    const connections = Array.from(groups, ([label, names]) => ({
+      label,
+      names:
+        names.length > MAX_CONNECTION_NAMES
+          ? [
+              ...names.slice(0, MAX_CONNECTION_NAMES),
+              `+${names.length - MAX_CONNECTION_NAMES} more`,
+            ]
+          : names,
+    }));
+    const result = connections.length ? connections : null;
+    this._connectionsCache.set(id, result);
+    return result;
   }
 
   update() {

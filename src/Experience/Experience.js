@@ -159,8 +159,11 @@ export default class Experience {
     }
     nodeHit.getWorldPosition(this._nodeWorldPos);
     const name = nodeHit.userData?.nodeName;
-    const record = this.world.lookupRecord(name);
-    tooltip.render(record, name);
+    const id = nodeHit.userData?.nodeId;
+    const node = nodeHit.userData?.nodeData || null;
+    const record = this.world.lookupRecord(name, id);
+    const connections = this.world.getConnections(id);
+    tooltip.render({ node, record, name, connections }, id || name);
     tooltip.showAt(this._nodeWorldPos);
   }
 

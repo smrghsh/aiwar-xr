@@ -32557,38 +32557,85 @@ class Floor {
   }
 }
 const CANVAS_WIDTH = 1024;
-const CANVAS_HEIGHT = 512;
-const PLANE_HEIGHT = 0.4;
-const TITLE_FONT = "bold 32px ui-monospace, Menlo, Consolas, monospace";
-const LABEL_FONT = "bold 18px ui-monospace, Menlo, Consolas, monospace";
-const BODY_FONT = "18px ui-monospace, Menlo, Consolas, monospace";
-const PADDING = 24;
+const MIN_CANVAS_HEIGHT = 190;
+const MAX_CANVAS_HEIGHT = 1400;
+const PLANE_WIDTH = 0.8;
+const FONT_FAMILY = "ui-monospace, Menlo, Consolas, monospace";
+const TITLE_FONT = `bold 34px ${FONT_FAMILY}`;
+const META_FONT = `20px ${FONT_FAMILY}`;
+const SECTION_FONT = `bold 15px ${FONT_FAMILY}`;
+const LABEL_FONT = `bold 18px ${FONT_FAMILY}`;
+const BODY_FONT = `18px ${FONT_FAMILY}`;
+const PADDING = 28;
 const LINE_HEIGHT = 24;
-const FIELDS = [
-  ["Developed", "Developed"],
+const TITLE_LINE_HEIGHT = 42;
+const FIELD_GAP = 6;
+const LABEL_COLUMN = 240;
+const MAX_FIELD_LINES = 5;
+const NODE_FIELDS = [
+  ["type", "Type"],
+  ["airo:type", "Role"],
+  ["MLTask", "ML Task"],
+  ["MLTasks", "ML Tasks"],
+  ["militaryUse", "Military Use"],
+  ["civicUse", "Civic Use"],
+  ["purpose", "Purpose"],
+  ["capacity", "Capabilities"],
+  ["vair:technique", "Technique"],
+  ["output", "Outputs"],
+  ["vair:riskSources", "Risk Sources"],
+  ["impact", "Impacts"],
+  ["people", "People"],
+  ["details", "Details"],
+  ["source", "Source"]
+];
+const RECORD_FIELDS = [
   ["Used By", "Used By"],
   ["Military Purpose", "Military Purpose"],
   ["Type of Tech", "Type of Tech"],
-  ["Repurpose (Potential/Actual)", "Repurpose"],
-  ["Source", "Source"],
-  ["SourceType", "Source Type"]
+  ["Repurpose (Potential/Actual)", "Repurpose"]
 ];
-function stripHtml(value) {
+function cleanValue(value) {
   if (value === void 0 || value === null) return "";
-  return String(value).replace(/<[^>]*>/g, "").trim();
+  if (typeof value === "number" && !Number.isFinite(value)) return "";
+  const text = String(value).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().replace(/[,;\s]+$/, "");
+  return text === "NaN" ? "" : text;
 }
-function wrapText(ctx, text, maxWidth) {
-  const words = text.split(/\s+/);
+function breakLongWord(ctx, word, maxWidth) {
+  if (ctx.measureText(word).width <= maxWidth) return [word];
+  const parts = [];
+  let chunk = "";
+  for (const char of word) {
+    if (chunk && ctx.measureText(chunk + char).width > maxWidth) {
+      parts.push(chunk);
+      chunk = char;
+    } else {
+      chunk += char;
+    }
+  }
+  if (chunk) parts.push(chunk);
+  return parts;
+}
+function wrapText(ctx, text, maxWidth, maxLines = Infinity) {
+  const words = text.split(/\s+/).flatMap((word) => breakLongWord(ctx, word, maxWidth));
   const lines = [];
   let current = "";
   for (const word of words) {
     const candidate = current ? current + " " + word : word;
-    if (ctx.measureText(candidate).width <= maxWidth) {
+    if (!current || ctx.measureText(candidate).width <= maxWidth) {
       current = candidate;
-    } else {
-      if (current) lines.push(current);
-      current = word;
+      continue;
     }
+    if (lines.length + 1 >= maxLines) {
+      let kept = current;
+      while (kept.includes(" ") && ctx.measureText(kept + " …").width > maxWidth) {
+        kept = kept.slice(0, kept.lastIndexOf(" "));
+      }
+      lines.push(kept + " …");
+      return lines;
+    }
+    lines.push(current);
+    current = word;
   }
   if (current) lines.push(current);
   return lines;
@@ -32599,15 +32646,13 @@ class Tooltip {
     this.scene = this.experience.scene;
     this.canvas = document.createElement("canvas");
     this.canvas.width = CANVAS_WIDTH;
-    this.canvas.height = CANVAS_HEIGHT;
+    this.canvas.height = MIN_CANVAS_HEIGHT;
     this.ctx = this.canvas.getContext("2d");
     this.texture = new CanvasTexture(this.canvas);
     this.texture.minFilter = LinearFilter$1;
-    const aspect2 = CANVAS_WIDTH / CANVAS_HEIGHT;
-    const geometry = new PlaneGeometry(
-      PLANE_HEIGHT * aspect2,
-      PLANE_HEIGHT
-    );
+    this.texture.generateMipmaps = false;
+    this._planeHeight = PLANE_WIDTH * (this.canvas.height / CANVAS_WIDTH);
+    const geometry = new PlaneGeometry(PLANE_WIDTH, this._planeHeight);
     const material = new MeshBasicMaterial$1({
       map: this.texture,
       transparent: true,
@@ -32631,71 +32676,283 @@ class Tooltip {
       this.mesh.lookAt(this._tmpTarget);
     };
     this._currentKey = null;
-    this._drawPlaceholder();
   }
-  _drawPlaceholder() {
-    const { ctx } = this;
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-    ctx.fillStyle = "#000000";
-    ctx.font = BODY_FONT;
-    ctx.textBaseline = "top";
-    ctx.fillText("(no data)", PADDING, PADDING);
-    this.texture.needsUpdate = true;
-  }
-  render(record, key) {
-    if (this._currentKey !== key) {
-      this._drawRecord(record);
-      this._currentKey = key;
+  render(data, key) {
+    var _a2;
+    const cacheKey = `${key}:${(data == null ? void 0 : data.record) ? "r" : "n"}:${((_a2 = data == null ? void 0 : data.connections) == null ? void 0 : _a2.length) || 0}`;
+    if (this._currentKey !== cacheKey) {
+      this._draw(this._buildLayout(data));
+      this._currentKey = cacheKey;
     }
     this.mesh.visible = true;
   }
-  _drawRecord(record) {
+  // Measure pass: computes wrapped lines and y positions before the canvas is
+  // resized (resizing clears the context), so the draw pass just paints.
+  _buildLayout(data) {
     const { ctx } = this;
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-    ctx.fillStyle = "#000000";
-    ctx.textBaseline = "top";
+    const node = (data == null ? void 0 : data.node) || null;
+    const record = (data == null ? void 0 : data.record) || null;
     const maxWidth = CANVAS_WIDTH - PADDING * 2;
+    const valueWidth = maxWidth - LABEL_COLUMN;
+    const items = [];
     let y2 = PADDING;
-    const title = stripHtml(record == null ? void 0 : record.Weapon) || "(unknown)";
-    ctx.font = TITLE_FONT;
-    ctx.fillText(title, PADDING, y2);
-    y2 += 44;
-    ctx.beginPath();
-    ctx.moveTo(PADDING, y2);
-    ctx.lineTo(CANVAS_WIDTH - PADDING, y2);
-    ctx.strokeStyle = "#000000";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    y2 += 12;
-    for (const [colKey, label2] of FIELDS) {
-      const raw = stripHtml(record == null ? void 0 : record[colKey]);
-      if (!raw) continue;
-      ctx.font = LABEL_FONT;
-      const labelText = `${label2}:`;
-      const labelWidth = ctx.measureText(labelText).width + 8;
-      ctx.fillText(labelText, PADDING, y2);
+    const pushField = (label2, value) => {
+      if (!value) return;
       ctx.font = BODY_FONT;
-      const lines = wrapText(ctx, raw, maxWidth - labelWidth);
-      lines.forEach((line, i2) => {
-        ctx.fillText(line, PADDING + labelWidth, y2 + i2 * LINE_HEIGHT);
+      const lines = wrapText(ctx, value, valueWidth, MAX_FIELD_LINES);
+      if (y2 + lines.length * LINE_HEIGHT > MAX_CANVAS_HEIGHT - PADDING) return;
+      items.push({ kind: "field", label: `${label2}:`, lines, y: y2 });
+      y2 += lines.length * LINE_HEIGHT + FIELD_GAP;
+    };
+    const title = cleanValue(node == null ? void 0 : node.name) || cleanValue(record == null ? void 0 : record.Weapon) || cleanValue(data == null ? void 0 : data.name) || "(unknown)";
+    ctx.font = TITLE_FONT;
+    const titleLines = wrapText(ctx, title, maxWidth, 2);
+    items.push({
+      kind: "lines",
+      font: TITLE_FONT,
+      color: "#000000",
+      lines: titleLines,
+      y: y2,
+      lineHeight: TITLE_LINE_HEIGHT
+    });
+    y2 += titleLines.length * TITLE_LINE_HEIGHT;
+    const metaParts = [
+      cleanValue(node == null ? void 0 : node.year),
+      cleanValue(node == null ? void 0 : node.currentStatus)
+    ].filter(Boolean);
+    if (metaParts.length) {
+      items.push({
+        kind: "lines",
+        font: META_FONT,
+        color: "#555555",
+        lines: [metaParts.join("  ·  ")],
+        y: y2,
+        lineHeight: LINE_HEIGHT
       });
-      y2 += Math.max(LINE_HEIGHT, lines.length * LINE_HEIGHT) + 4;
-      if (y2 > CANVAS_HEIGHT - PADDING) break;
+      y2 += LINE_HEIGHT;
     }
-    this.texture.needsUpdate = true;
+    y2 += 6;
+    items.push({ kind: "rule", y: y2 });
+    y2 += 14;
+    if (node) {
+      for (const [key, label2] of NODE_FIELDS) {
+        pushField(label2, cleanValue(node[key]));
+      }
+    }
+    if (record) {
+      const sectionIndex = items.length;
+      const sectionY = y2;
+      y2 += 8;
+      items.push({ kind: "section", text: "AI WAR CLOUD DATABASE", y: y2 });
+      y2 += 26;
+      const developed = cleanValue(record.Developed);
+      if (developed && developed !== cleanValue(node == null ? void 0 : node.year)) {
+        pushField("Developed", developed);
+      }
+      for (const [key, label2] of RECORD_FIELDS) {
+        pushField(label2, cleanValue(record[key]));
+      }
+      const source = cleanValue(record.Source);
+      const sourceType = cleanValue(record.SourceType);
+      pushField(
+        "Source",
+        source && sourceType ? `${source} (${sourceType})` : source || sourceType
+      );
+      if (!items.slice(sectionIndex + 1).some((i2) => i2.kind === "field")) {
+        items.length = sectionIndex;
+        y2 = sectionY;
+      }
+    }
+    const connections = Array.isArray(data == null ? void 0 : data.connections) ? data.connections : null;
+    if (connections == null ? void 0 : connections.length) {
+      const sectionIndex = items.length;
+      const sectionY = y2;
+      y2 += 8;
+      items.push({ kind: "section", text: "CONNECTIONS", y: y2 });
+      y2 += 26;
+      for (const group of connections) {
+        pushField(group.label, group.names.join(", "));
+      }
+      if (!items.slice(sectionIndex + 1).some((i2) => i2.kind === "field")) {
+        items.length = sectionIndex;
+        y2 = sectionY;
+      }
+    }
+    if (items.every((item) => item.kind !== "field")) {
+      pushField("Info", "(no data)");
+    }
+    const height = Math.min(
+      MAX_CANVAS_HEIGHT,
+      Math.max(MIN_CANVAS_HEIGHT, y2 - FIELD_GAP + PADDING)
+    );
+    return { items, height };
+  }
+  _draw(layout) {
+    const { ctx, canvas } = this;
+    const heightChanged = canvas.height !== layout.height;
+    canvas.height = layout.height;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, CANVAS_WIDTH, layout.height);
+    ctx.textBaseline = "top";
+    for (const item of layout.items) {
+      if (item.kind === "lines") {
+        ctx.font = item.font;
+        ctx.fillStyle = item.color;
+        item.lines.forEach((line, i2) => {
+          ctx.fillText(line, PADDING, item.y + i2 * item.lineHeight);
+        });
+      } else if (item.kind === "rule") {
+        ctx.beginPath();
+        ctx.moveTo(PADDING, item.y);
+        ctx.lineTo(CANVAS_WIDTH - PADDING, item.y);
+        ctx.strokeStyle = "#000000";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      } else if (item.kind === "section") {
+        ctx.font = SECTION_FONT;
+        ctx.fillStyle = "#666666";
+        ctx.fillText(item.text, PADDING, item.y);
+      } else if (item.kind === "field") {
+        ctx.font = LABEL_FONT;
+        ctx.fillStyle = "#000000";
+        ctx.fillText(item.label, PADDING, item.y);
+        ctx.font = BODY_FONT;
+        item.lines.forEach((line, i2) => {
+          ctx.fillText(line, PADDING + LABEL_COLUMN, item.y + i2 * LINE_HEIGHT);
+        });
+      }
+    }
+    if (heightChanged) {
+      this.texture.dispose();
+      this.texture = new CanvasTexture(canvas);
+      this.texture.minFilter = LinearFilter$1;
+      this.texture.generateMipmaps = false;
+      this.mesh.material.map = this.texture;
+    } else {
+      this.texture.needsUpdate = true;
+    }
+    const planeHeight = PLANE_WIDTH * (layout.height / CANVAS_WIDTH);
+    if (Math.abs(planeHeight - this._planeHeight) > 1e-4) {
+      this.mesh.geometry.dispose();
+      this.mesh.geometry = new PlaneGeometry(PLANE_WIDTH, planeHeight);
+      this._planeHeight = planeHeight;
+    }
   }
   showAt(worldPos) {
     this.mesh.position.copy(worldPos);
-    this.mesh.position.y += 0.18;
+    this.mesh.position.y += this._planeHeight / 2 + 0.1;
     this.mesh.visible = true;
   }
   hide() {
     this.mesh.visible = false;
   }
 }
+const RECORD_ALIASES = {
+  ARCA: "Assault Rifle Combat Application System",
+  "Pantir-SM": "Pantsir-SM",
+  Maven: "Maven Smart System",
+  SuperAegis: "Super Aegis III"
+};
+function normalizeName(value) {
+  if (value === void 0 || value === null) return "";
+  return String(value).toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+function nameVariants(name) {
+  const variants = /* @__PURE__ */ new Set();
+  const add2 = (value) => {
+    const trimmed = value.replace(/\s+/g, " ").trim();
+    if (trimmed) variants.add(trimmed);
+  };
+  const withoutParens = (value) => value.replace(/\([^)]*\)/g, " ");
+  const parenContents = (value) => Array.from(value.matchAll(/\(([^)]*)\)/g), (m2) => m2[1]).filter(
+    (content) => content.trim().length >= 3
+  );
+  add2(withoutParens(name));
+  parenContents(name).forEach(add2);
+  for (const part of name.split(",")) {
+    add2(part);
+    add2(withoutParens(part));
+    parenContents(part).forEach(add2);
+  }
+  for (const variant of [name, ...variants]) {
+    if (/^the\s+/i.test(variant)) add2(variant.replace(/^the\s+/i, ""));
+  }
+  return variants;
+}
+function buildRecordIndex(rows) {
+  const index2 = /* @__PURE__ */ new Map();
+  const addKey = (name, row) => {
+    const key = normalizeName(name);
+    if (key && !index2.has(key)) index2.set(key, row);
+  };
+  for (const row of rows) addKey(row.Weapon, row);
+  for (const row of rows) {
+    const weapon = row.Weapon === void 0 ? "" : String(row.Weapon).trim();
+    if (!weapon) continue;
+    for (const variant of nameVariants(weapon)) addKey(variant, row);
+  }
+  return index2;
+}
+function findRecord(index2, ...candidates) {
+  if (!index2 || index2.size === 0) return null;
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    for (const name of [candidate, RECORD_ALIASES[candidate]]) {
+      if (!name) continue;
+      const record = index2.get(normalizeName(name));
+      if (record) return record;
+    }
+  }
+  return null;
+}
 const CSV_PATH = "./data/aiwarcloud-table.csv";
+const OUTGOING_LABELS = {
+  developed: "Developed",
+  employed: "Employs",
+  "proposed relationship": "Proposed use of",
+  CEO: "CEO of",
+  founder: "Founder of",
+  employee: "Employee of",
+  investor: "Investor in",
+  owner: "Owner of",
+  "prospective owner": "Prospective owner of",
+  "former partner": "Former partner of",
+  "unit vetran": "Unit veteran of"
+};
+const INCOMING_LABELS = {
+  developed: "Developed by",
+  employed: "Employed by",
+  "proposed relationship": "Proposed use by",
+  "used in": "Deployment site of",
+  "based in": "Home of",
+  CEO: "CEO",
+  founder: "Founded by",
+  employee: "Employees",
+  investor: "Investors",
+  owner: "Owned by",
+  "prospective owner": "Prospective owner",
+  "former partner": "Former partner",
+  "unit vetran": "Unit veterans",
+  owns: "Owned by",
+  "invested in": "Investment from",
+  "invests in": "Investment from",
+  "part of": "Includes",
+  "member of": "Members",
+  purchased: "Purchased by",
+  "sold to": "Acquired",
+  contracts: "Contracted by",
+  incorporates: "Incorporated into",
+  "based on": "Basis of",
+  "relies on": "Relied on by",
+  "provides data to": "Data from",
+  "partners with": "Partners with",
+  affiliated: "Affiliated",
+  similar: "Similar"
+};
+const MAX_CONNECTION_NAMES = 8;
+function capitalize(text) {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
 class World {
   constructor() {
     this.experience = new Experience();
@@ -32814,18 +33071,53 @@ class World {
         skipEmptyLines: true,
         dynamicTyping: true
       });
-      for (const row of parsed.data) {
-        const key = row.Weapon && String(row.Weapon).trim();
-        if (key) this.records.set(key, row);
-      }
-      console.log(`Loaded ${this.records.size} aiwar records`);
+      this.records = buildRecordIndex(parsed.data);
+      console.log(`Loaded ${this.records.size} aiwar record keys`);
     } catch (err2) {
       console.error("Failed to load aiwar CSV:", err2);
     }
   }
-  lookupRecord(name) {
-    if (!name || !this.records) return null;
-    return this.records.get(String(name).trim()) || null;
+  lookupRecord(name, id2) {
+    return findRecord(this.records, name, id2);
+  }
+  getConnections(id2) {
+    var _a2, _b2;
+    const graph2 = window.aiwarGraph;
+    if (!id2 || !((_a2 = graph2 == null ? void 0 : graph2.edges) == null ? void 0 : _a2.length) || !((_b2 = graph2 == null ? void 0 : graph2.nodes) == null ? void 0 : _b2.length)) return null;
+    if (this._connectionsGraph !== graph2) {
+      this._connectionsGraph = graph2;
+      this._connectionsCache = /* @__PURE__ */ new Map();
+      this._nodeNames = new Map(
+        graph2.nodes.map((node) => [node.id, node.name || node.id])
+      );
+    }
+    if (this._connectionsCache.has(id2)) return this._connectionsCache.get(id2);
+    const idOf = (ref) => ref && typeof ref === "object" ? ref.id : ref;
+    const groups = /* @__PURE__ */ new Map();
+    const addTo = (label2, otherId) => {
+      if (!groups.has(label2)) groups.set(label2, []);
+      groups.get(label2).push(this._nodeNames.get(otherId) || otherId);
+    };
+    for (const edge of graph2.edges) {
+      const source = idOf(edge.source);
+      const target = idOf(edge.target);
+      const label2 = edge.label || "connected to";
+      if (source === id2) {
+        addTo(OUTGOING_LABELS[label2] || capitalize(label2), target);
+      } else if (target === id2) {
+        addTo(INCOMING_LABELS[label2] || `← ${capitalize(label2)}`, source);
+      }
+    }
+    const connections = Array.from(groups, ([label2, names2]) => ({
+      label: label2,
+      names: names2.length > MAX_CONNECTION_NAMES ? [
+        ...names2.slice(0, MAX_CONNECTION_NAMES),
+        `+${names2.length - MAX_CONNECTION_NAMES} more`
+      ] : names2
+    }));
+    const result = connections.length ? connections : null;
+    this._connectionsCache.set(id2, result);
+    return result;
   }
   update() {
     if (this.ready) {
@@ -33177,7 +33469,7 @@ class Experience {
     return this.renderer.instance.xr.isPresenting;
   }
   updateTooltipRaycast() {
-    var _a2, _b2, _c, _d, _e, _f;
+    var _a2, _b2, _c, _d, _e, _f, _g, _h;
     const tooltip = (_a2 = this.world) == null ? void 0 : _a2.tooltip;
     const networkGroup = window.networkGroup;
     if (!tooltip || !networkGroup) return;
@@ -33229,8 +33521,11 @@ class Experience {
     }
     nodeHit.getWorldPosition(this._nodeWorldPos);
     const name = (_f = nodeHit.userData) == null ? void 0 : _f.nodeName;
-    const record = this.world.lookupRecord(name);
-    tooltip.render(record, name);
+    const id2 = (_g = nodeHit.userData) == null ? void 0 : _g.nodeId;
+    const node = ((_h = nodeHit.userData) == null ? void 0 : _h.nodeData) || null;
+    const record = this.world.lookupRecord(name, id2);
+    const connections = this.world.getConnections(id2);
+    tooltip.render({ node, record, name, connections }, id2 || name);
     tooltip.showAt(this._nodeWorldPos);
   }
   resize() {
@@ -73991,2847 +74286,4650 @@ const state = {
     fetchRawDataFromTemplating() {
       state.rawData = [
         {
-          nodes: {
-            LargeGeospatialModels: {
-              metadata: {
-                id: "LargeGeospatialModels",
-                name: "Large Geospatial Models",
-                year: 2025,
-                currentStatus: "Development",
-                type: "GenerativeModel",
-                militaryUse: "Reconnaissance",
-                civicUse: "AR, Games",
-                MLTask: "imageGeneration, Photogrammetry, TransformerModel",
-                purpose: "PredictiveMapping",
-                capacity: "ImageGeneration",
+          "nodes": {
+            "LargeGeospatialModels": {
+              "metadata": {
+                "id": "LargeGeospatialModels",
+                "name": "Large Geospatial Models",
+                "year": 2025,
+                "currentStatus": "Development",
+                "type": "GenerativeAI",
+                "MLTask": "Generate",
+                "militaryUse": "Intelligence",
+                "civicUse": "AR, Games",
+                "MLTasks": "imageGeneration, Photogrammetry, TransformerModel",
+                "purpose": "PredictiveMapping",
+                "capacity": "ImageGeneration",
                 "vair:technique": "DeepLearning",
-                output: "Content",
-                "vair:riskSources": "InaccuratePrediction, BiasedTrainingData, ",
-                impact: "PhysicalInjury, Overreliance, DistortionInHumanBehavior",
-                hover: "name: Large Geospatial Models; year: 2025; type: GenerativeModel; Military use: Reconnaissance; Civic use: AR, Games; Purpose: PredictiveMapping; Capabilities: ImageGeneration; Outputs: Content; Impacts: PhysicalInjury, Overreliance, DistortionInHumanBehavior",
-                image: "./assets/noun-photogrammetry-4284363.png",
-                nounKey: "terrainMapping"
+                "output": "Content",
+                "vair:riskSources": "InaccuratePrediction, BiasedTrainingData,",
+                "impact": "PhysicalInjury, Overreliance, DistortionInHumanBehavior",
+                "hover": "name: Large Geospatial Models; year: 2025; task: GenerativeAI; AI type: Generate; Military use: Intelligence; Civic use: AR, Games",
+                "image": "./assets/noun-photogrammetry-4284363.png",
+                "nounKey": "terrainMapping",
+                "color": "#5186DB"
               }
             },
-            US: {
-              metadata: {
-                id: "US",
-                name: "United States",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: United States; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#5186DB"
-              }
-            },
-            PolygraphPlus: {
-              metadata: {
-                id: "PolygraphPlus",
-                name: "Polygraph+",
-                year: 2024,
-                currentStatus: "Development",
-                type: "NarrowAI",
-                militaryUse: "Intelligence",
-                civicUse: "BehaviorEvaluation",
-                MLTask: "SignalAnalysis",
-                purpose: "DetectingLies, DetectingCriminalOffences, AssessingRiskOfOffending, AssessingPeopleRelatedRisk, EvaluatingEmployeePerformance, EvaluatingJobCandidates, ProducingRecommendation",
-                capacity: "LieDetection, BehaviourAnalysis, BiometricsBasedEmotionRecognition, BiometricCategorisation, EmotionRecognition, GestureRecognition, Profiling, ",
+            "PolygraphPlus": {
+              "metadata": {
+                "id": "PolygraphPlus",
+                "name": "Polygraph+",
+                "year": 2024,
+                "currentStatus": "Development",
+                "type": "BehaviorModeling, AnomalyDetection, ComputerVision, VoiceRecognition, IoT",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "BehaviorEvaluation",
+                "MLTasks": "SignalAnalysis",
+                "purpose": "DetectingLies, DetectingCriminalOffences, AssessingRiskOfOffending, AssessingPeopleRelatedRisk, EvaluatingEmployeePerformance, EvaluatingJobCandidates, ProducingRecommendation",
+                "capacity": "LieDetection, BehaviourAnalysis, BiometricsBasedEmotionRecognition, BiometricCategorisation, EmotionRecognition, GestureRecognition, Profiling,",
                 "vair:technique": "SemiUnsupervisedLearning, StatisticalTechnique",
-                output: "Decision",
-                "vair:riskSources": NaN,
-                impact: "WellbeingImpact, PsychologicalHarm",
-                hover: "name: Polygraph+; year: 2024; type: NarrowAI; Military use: Intelligence; Civic use: BehaviorEvaluation; Purpose: DetectingLies, DetectingCriminalOffences, AssessingRiskOfOffending, AssessingPeopleRelatedRisk, EvaluatingEmployeePerformance, EvaluatingJobCandidates, ProducingRecommendation; Capabilities: LieDetection, BehaviourAnalysis, BiometricsBasedEmotionRecognition, BiometricCategorisation, EmotionRecognition, GestureRecognition, Profiling, ; Outputs: Decision; Impacts: WellbeingImpact, PsychologicalHarm",
-                image: "./assets/noun-neurofeedback-7447387.png",
-                nounKey: "neurofeedback",
-                color: "#5186DB"
+                "output": "Decision",
+                "impact": "WellbeingImpact, PsychologicalHarm",
+                "hover": "name: Polygraph+; year: 2024; task: BehaviorModeling, AnomalyDetection, ComputerVision, VoiceRecognition, IoT; AI type: Recognize; Military use: Intelligence; Civic use: BehaviorEvaluation",
+                "image": "./assets/noun-neurofeedback-7447387.png",
+                "nounKey": "neurofeedback",
+                "color": "#5186DB"
               }
             },
-            Lavender: {
-              metadata: {
-                id: "Lavender",
-                name: "Lavender",
-                year: 2023,
-                currentStatus: "Operation",
-                type: "ExpertSystem",
-                militaryUse: "Intelligence",
-                civicUse: "RecommenderSystems",
-                MLTask: "Ranking, Recommendation",
-                purpose: "ProducingRecommendation",
-                capacity: "Profiling, InformationRetrieval, NamedEntityRecognition, RelationshipExtraction, SensitiveAttributeInference, SentimentAnalysis",
+            "Lavender": {
+              "metadata": {
+                "id": "Lavender",
+                "name": "Lavender",
+                "year": 2023,
+                "currentStatus": "Operation",
+                "type": "RecommendationSystem, PredictiveAnalytics, BehaviorModeling",
+                "MLTask": "Predict",
+                "militaryUse": "Intelligence",
+                "civicUse": "RecommenderSystem",
+                "MLTasks": "Ranking, Recommendation",
+                "purpose": "ProducingRecommendation",
+                "capacity": "Profiling, InformationRetrieval, NamedEntityRecognition, RelationshipExtraction, SensitiveAttributeInference, SentimentAnalysis",
                 "vair:technique": "LanguageModels",
-                output: "Recommendation",
+                "output": "Recommendation",
                 "vair:riskSources": "InaccurateRecommendation, BiasedTrainingData, ErrorInDataCollection, ErrorInDataPreparation, WrongDataDesignChoice, LowAccuracy",
-                impact: "PhysicalInjury, WellbeingImpact, PsychologicalHarm",
-                hover: "name: Lavender; year: 2023; type: ExpertSystem; Military use: Intelligence; Civic use: RecommenderSystems; Purpose: ProducingRecommendation; Capabilities: Profiling, InformationRetrieval, NamedEntityRecognition, RelationshipExtraction, SensitiveAttributeInference, SentimentAnalysis; Outputs: Recommendation; Impacts: PhysicalInjury, WellbeingImpact, PsychologicalHarm",
-                image: "./assets/noun-networking-2909312.png",
-                nounKey: "ml",
-                color: "#51DBD9"
+                "impact": "PhysicalInjury, WellbeingImpact, PsychologicalHarm",
+                "hover": "name: Lavender; year: 2023; task: RecommendationSystem, PredictiveAnalytics, BehaviorModeling; AI type: Predict; Military use: Intelligence; Civic use: RecommenderSystem",
+                "image": "./assets/noun-target-7619584.png",
+                "nounKey": "ml",
+                "color": "#51DBD9"
               }
             },
-            Israel: {
-              metadata: {
-                id: "Israel",
-                name: "Israel",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: Israel; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBD9"
-              }
-            },
-            WheresDaddy: {
-              metadata: {
-                id: "WheresDaddy",
-                name: "Where's Daddy",
-                year: 2023,
-                currentStatus: "Operation",
-                type: "ExpertSystem",
-                militaryUse: "Command&Control",
-                civicUse: "Logistics, Delivery, Advertising",
-                MLTask: "PatternRecognition, SignalAnalysis, TextAnalysis",
-                purpose: "ProducingRecommendation, DetectingIndividuals",
-                capacity: "Geolocation, ComputerVision, ObjectRecognition, SignalTracking",
-                "vair:technique": NaN,
-                output: "Prediction",
+            "WheresDaddy": {
+              "metadata": {
+                "id": "WheresDaddy",
+                "name": "Where's Daddy",
+                "year": 2023,
+                "currentStatus": "Operation",
+                "type": "LocationAwareness",
+                "MLTask": "Predict",
+                "militaryUse": "Command",
+                "civicUse": "Logistics, Delivery, Advertising",
+                "MLTasks": "PatternRecognition, DataSynthesis, SignalAnalysis, TextAnalysis,",
+                "purpose": "ProducingRecommendation, DetectingIndividuals",
+                "capacity": "Geolocation, ComputerVision, ObjectRecognition, SignalTracking",
+                "output": "Prediction",
                 "vair:riskSources": "InaccurateRecommendation, BiasedTrainingData, ErrorInDataCollection, ErrorInDataPreparation, WrongDataDesignChoice, LowAccuracy",
-                impact: "PhysicalInjury, WellbeingImpact, PsychologicalHarm",
-                hover: "name: Where's Daddy; year: 2023; type: ExpertSystem; Military use: Command&Control; Civic use: Logistics, Delivery, Advertising; Purpose: ProducingRecommendation, DetectingIndividuals; Capabilities: Geolocation, ComputerVision, ObjectRecognition, SignalTracking; Outputs: Prediction; Impacts: PhysicalInjury, WellbeingImpact, PsychologicalHarm",
-                image: "./assets/noun-infrared-drone-4284335.png",
-                nounKey: "locationTracking",
-                color: "#51DBD9"
+                "impact": "PhysicalInjury, WellbeingImpact, PsychologicalHarm",
+                "hover": "name: Where's Daddy; year: 2023; task: LocationAwareness; AI type: Predict; Military use: Command; Civic use: Logistics, Delivery, Advertising",
+                "image": "./assets/noun-infrared-drone-4284335.png",
+                "nounKey": "locationTracking",
+                "color": "#51DBD9"
               }
             },
-            LegionX: {
-              metadata: {
-                id: "LegionX",
-                name: "LegionX",
-                year: 2022,
-                currentStatus: "Operation",
-                type: "ExpertSystem",
-                militaryUse: "Reconnaissance, Intelligence, Command&Control",
-                civicUse: "Policing, CrowdControl, PrivateSecurity, BehaviorEvaluation",
-                MLTask: "PatternRecognition, ObjectRecognition, PoseEstimation",
-                purpose: "ProducingRecommendation, DetectingIndividuals",
-                capacity: "ObjectDetection, PoseEstimation, Geolocation",
-                "vair:technique": NaN,
-                output: "Prediction, Recommendation",
-                "vair:riskSources": NaN,
-                impact: "PhysicalInjury, Overreliance, DistortionInHumanBehavior",
-                hover: "name: LegionX; year: 2022; type: ExpertSystem; Military use: Reconnaissance, Intelligence, Command&Control; Civic use: Policing, CrowdControl, PrivateSecurity, BehaviorEvaluation; Purpose: ProducingRecommendation, DetectingIndividuals; Capabilities: ObjectDetection, PoseEstimation, Geolocation; Outputs: Prediction, Recommendation; Impacts: PhysicalInjury, Overreliance, DistortionInHumanBehavior",
-                image: "./assets/noun-remote-team-6432341.png",
-                nounKey: "poseRecognition",
-                color: "#51DBD9"
+            "LegionX": {
+              "metadata": {
+                "id": "LegionX",
+                "name": "LegionX",
+                "year": 2022,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation, MultiAgentSystem",
+                "MLTask": "Automate",
+                "militaryUse": "Operations, Intelligence",
+                "civicUse": "Policing, CrowdControl, PrivateSecurity, BehaviorEvaluation",
+                "MLTasks": "PatternRecognition, ObjectRecognition, PoseEstimation",
+                "purpose": "ProducingRecommendation, DetectingIndividuals",
+                "capacity": "ObjectDetection, PoseEstimation, Geolocation",
+                "output": "Action, Decision",
+                "impact": "PhysicalInjury, Overreliance, DistortionInHumanBehavior",
+                "hover": "name: LegionX; year: 2022; task: Robotics/Navigation, MultiAgentSystem; AI type: Automate; Military use: Operations, Intelligence; Civic use: Policing, CrowdControl, PrivateSecurity, BehaviorEvaluation",
+                "image": "./assets/noun-drone-strike-75130.png",
+                "nounKey": "poseRecognition",
+                "color": "#51DBD9"
               }
             },
-            WolfPack: {
-              metadata: {
-                id: "WolfPack",
-                name: "Wolf Pack",
-                year: 2018,
-                currentStatus: "Operation",
-                type: "TrainingDatabase",
-                militaryUse: "Intelligence",
-                civicUse: "ConsumerTracking, Marketing, Security, SocialWelfareSystems",
-                MLTask: NaN,
-                purpose: "Monitoring, PerformingBackgroundChecks, RecognizingIndividuals",
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: "PhysicalInjury, WellbeingImpact, PsychologicalHarm, Overreliance, DistortionInHumanBehavior",
-                hover: "name: Wolf Pack; year: 2018; type: TrainingDatabase; Military use: Intelligence; Civic use: ConsumerTracking, Marketing, Security, SocialWelfareSystems; Purpose: Monitoring, PerformingBackgroundChecks, RecognizingIndividuals; Capabilities: ; Outputs: ; Impacts: PhysicalInjury, WellbeingImpact, PsychologicalHarm, Overreliance, DistortionInHumanBehavior",
-                image: "./assets/noun-ai-training-data-2985134.png",
-                nounKey: "trainingData",
-                color: "#51DBD9"
+            "WolfPack": {
+              "metadata": {
+                "id": "WolfPack",
+                "name": "Wolf Pack",
+                "year": 2018,
+                "currentStatus": "Operation",
+                "type": "DataManagement",
+                "MLTask": "Store",
+                "militaryUse": "Logistics",
+                "civicUse": "ConsumerTracking, Marketing, Security, SocialWelfareSystems",
+                "purpose": "Monitoring, PerformingBackgroundChecks, RecognizingIndividuals",
+                "impact": "PhysicalInjury, WellbeingImpact, PsychologicalHarm, Overreliance, DistortionInHumanBehavior",
+                "hover": "name: Wolf Pack; year: 2018; task: DataManagement; AI type: Store; Military use: Logistics; Civic use: ConsumerTracking, Marketing, Security, SocialWelfareSystems",
+                "image": "./assets/noun-ai-training-data-2985134.png",
+                "nounKey": "trainingData",
+                "color": "#51DBD9"
               }
             },
-            AIP: {
-              metadata: {
-                id: "AIP",
-                name: "AIP",
-                year: 2022,
-                currentStatus: "Operation",
-                type: "MultiAgentSystem, Dashboard",
-                militaryUse: "Command&Control",
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: "Action, Content, Decision, Prediction, Recommendation",
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: AIP; year: 2022; type: MultiAgentSystem, Dashboard; Military use: Command&Control; Civic use: ; Purpose: ; Capabilities: ; Outputs: Action, Content, Decision, Prediction, Recommendation; Impacts: ",
-                image: "./assets/noun-surveillance-monitor-6831349.png",
-                nounKey: NaN,
-                color: "#51B2DB"
+            "AIP": {
+              "metadata": {
+                "id": "AIP",
+                "name": "Artificial Intelligence Platform",
+                "year": 2022,
+                "currentStatus": "Operation",
+                "type": "NLP, GenerativeAI",
+                "MLTask": "Generate",
+                "militaryUse": "Command",
+                "civicUse": "Dashboard, ProjectManagement",
+                "output": "Action, Content, Decision, Prediction, Recommendation",
+                "hover": "name: Artificial Intelligence Platform; year: 2022; task: NLP, GenerativeAI; AI type: Generate; Military use: Command; Civic use: Dashboard, ProjectManagement",
+                "image": "./assets/noun-surveillance-monitor-6831349.png",
+                "color": "#51B2DB"
               }
             },
-            MetaConstellation: {
-              metadata: {
-                id: "MetaConstellation",
-                name: "Meta Constellation",
-                year: 2022,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Meta Constellation; year: 2022; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-remote-team-6432341.png",
-                nounKey: "locationTracking",
-                color: "#51B2DB"
+            "MetaConstellation": {
+              "metadata": {
+                "id": "MetaConstellation",
+                "name": "Meta Constellation",
+                "year": 2022,
+                "currentStatus": "Operation",
+                "type": "PlanningSystem, MultiAgentSystem, RecommenderSystem",
+                "MLTask": "Assign",
+                "militaryUse": "Intelligence",
+                "civicUse": "Dashboard, SupplyChainManagement",
+                "hover": "name: Meta Constellation; year: 2022; task: PlanningSystem, MultiAgentSystem, RecommenderSystem; AI type: Assign; Military use: Intelligence; Civic use: Dashboard, SupplyChainManagement",
+                "image": "./assets/noun-remote-team-6432341.png",
+                "nounKey": "locationTracking",
+                "color": "#51B2DB"
               }
             },
-            Clearview: {
-              metadata: {
-                id: "Clearview",
-                name: "Clearview",
-                year: 2022,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: "Surveillance",
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: "IdentifyingIndividuals, RecognizingIndividuals, RemoteIdentification",
-                capacity: "FaceRecognition",
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Clearview; year: 2022; type: ; Military use: Surveillance; Civic use: ; Purpose: IdentifyingIndividuals, RecognizingIndividuals, RemoteIdentification; Capabilities: FaceRecognition; Outputs: ; Impacts: ",
-                image: "./assets/noun-facial-recognition-4116350.png",
-                nounKey: "faceRecognition",
-                color: "#51B2DB"
+            "Clearview": {
+              "metadata": {
+                "id": "Clearview",
+                "name": "Clearview",
+                "year": 2022,
+                "currentStatus": "Operation",
+                "type": "FacialRecognition; ComputerVision",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "IdentityVerification, AppUnlocking, AccessGranting",
+                "purpose": "IdentifyingIndividuals, RecognizingIndividuals, RemoteIdentification",
+                "capacity": "FaceRecognition",
+                "hover": "name: Clearview; year: 2022; task: FacialRecognition; ComputerVision; AI type: Recognize; Military use: Intelligence; Civic use: IdentityVerification, AppUnlocking, AccessGranting",
+                "image": "./assets/noun-facial-recognition-4116350.png",
+                "nounKey": "faceRecognition",
+                "color": "#51B2DB"
               }
             },
-            Wolly: {
-              metadata: {
-                id: "Wolly",
-                name: "Wolly",
-                year: 2022,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Wolly; year: 2022; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-turret-6749967.png",
-                nounKey: "robotPolicing",
-                color: "#51B2DB"
+            "Wolly": {
+              "metadata": {
+                "id": "Wolly",
+                "name": "Wolly",
+                "year": 2022,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation, ComputerVision, RecommenderSystem",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, CrowdControl, PrivateSecurity",
+                "hover": "name: Wolly; year: 2022; task: Robotics/Navigation, ComputerVision, RecommenderSystem; AI type: Automate; Military use: Operations; Civic use: Policing, CrowdControl, PrivateSecurity",
+                "image": "./assets/noun-turret-6749967.png",
+                "nounKey": "robotPolicing",
+                "color": "#51B2DB"
               }
             },
-            Ukraine: {
-              metadata: {
-                id: "Ukraine",
-                name: "Ukraine",
-                type: "Nation",
-                "airo:type": "AIDeployer, AISubject",
-                hover: "name: Ukraine; stakeholder: Nation; role: AIDeployer, AISubject",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#51B2DB"
+            "FirstPOVDrones": {
+              "metadata": {
+                "id": "FirstPOVDrones",
+                "name": "First  Person View Drones",
+                "year": 2022,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, Surveillance",
+                "hover": "name: First  Person View Drones; year: 2022; task: Robotics/Navigation; AI type: Automate; Military use: Operations; Civic use: Policing, Surveillance",
+                "image": "./assets/noun-drone-strike-75130.png",
+                "nounKey": "uav",
+                "color": "#51B2DB"
               }
             },
-            FirstPOVDrones: {
-              metadata: {
-                id: "FirstPOVDrones",
-                name: "First  Person View Drones",
-                year: 2022,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: First  Person View Drones; year: 2022; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-drone-strike-75130.png",
-                nounKey: "uav"
+            "MAPLE": {
+              "metadata": {
+                "id": "MAPLE",
+                "name": "MAPLE",
+                "year": 2022,
+                "currentStatus": "Operation",
+                "type": "IntelligentControlSystem, Simulation",
+                "MLTask": "Assign",
+                "militaryUse": "Command",
+                "civicUse": "Logistics, Delivery, SupplyChainManagement",
+                "hover": "name: MAPLE; year: 2022; task: IntelligentControlSystem, Simulation; AI type: Assign; Military use: Command; Civic use: Logistics, Delivery, SupplyChainManagement",
+                "image": "./assets/noun-surveillance-monitor-6831349.png",
+                "color": "#51DBAB"
               }
             },
-            MAPLE: {
-              metadata: {
-                id: "MAPLE",
-                name: "MAPLE",
-                year: 2022,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: "Command&Control",
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: MAPLE; year: 2022; type: ; Military use: Command&Control; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-surveillance-monitor-6831349.png",
-                nounKey: NaN,
-                color: "#51DBAB"
+            "Gospel": {
+              "metadata": {
+                "id": "Gospel",
+                "name": "The Gospel",
+                "year": 2021,
+                "currentStatus": "Operation",
+                "type": "ExpertSystem, Classification",
+                "MLTask": "Sort",
+                "militaryUse": "Command",
+                "civicUse": "ConsumerTracking, Security, SocialWelfareSystems",
+                "MLTasks": "Automate",
+                "hover": "name: The Gospel; year: 2021; task: ExpertSystem, Classification; AI type: Sort; Military use: Command; Civic use: ConsumerTracking, Security, SocialWelfareSystems",
+                "image": "./assets/noun-earthquake-damage-6326583.png",
+                "color": "#51DBD9"
               }
             },
-            UK: {
-              metadata: {
-                id: "UK",
-                name: "United Kingdom",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: United Kingdom; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBAB"
-              }
-            },
-            Gospel: {
-              metadata: {
-                id: "Gospel",
-                name: "The Gospel",
-                year: 2021,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: The Gospel; year: 2021; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-earthquake-damage-6326583.png",
-                nounKey: NaN,
-                color: "#51DBD9"
-              }
-            },
-            Alchemist: {
-              metadata: {
-                id: "Alchemist",
-                name: "Alchemist",
-                year: 2021,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
+            "Alchemist": {
+              "metadata": {
+                "id": "Alchemist",
+                "name": "Alchemist",
+                "year": 2021,
+                "currentStatus": "Operation",
+                "type": "LocationAwareness, AnomalyDetection",
+                "MLTask": "Recognize",
+                "militaryUse": "Operations, Intelligence",
+                "civicUse": "Policing, Security, BorderPatrol",
                 "vair:technique": "realTime",
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Alchemist; year: 2021; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-mobile-tracking-5477710.png",
-                nounKey: NaN,
-                color: "#51DBD9"
+                "hover": "name: Alchemist; year: 2021; task: LocationAwareness, AnomalyDetection; AI type: Recognize; Military use: Operations, Intelligence; Civic use: Policing, Security, BorderPatrol",
+                "image": "./assets/noun-mobile-tracking-5477710.png",
+                "color": "#51DBD9"
               }
             },
-            Nimbus: {
-              metadata: {
-                id: "Nimbus",
-                name: "Project Nimbus",
-                year: 2021,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Project Nimbus; year: 2021; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-data-center-2301592.png",
-                nounKey: NaN
+            "Nimbus": {
+              "metadata": {
+                "id": "Nimbus",
+                "name": "Project Nimbus",
+                "year": 2021,
+                "currentStatus": "Operation",
+                "type": "DataManagement",
+                "MLTask": "Store",
+                "militaryUse": "Logistics",
+                "civicUse": "CloudComputing",
+                "hover": "name: Project Nimbus; year: 2021; task: DataManagement; AI type: Store; Military use: Logistics; Civic use: CloudComputing",
+                "image": "./assets/noun-data-center-2301592.png",
+                "color": "#51DBD9"
               }
             },
-            ARCA: {
-              metadata: {
-                id: "ARCA",
-                name: "ARCA",
-                year: 2021,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: ARCA; year: 2021; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-target-7619584.png",
-                nounKey: NaN,
-                color: "#51DBD9"
+            "ARCA": {
+              "metadata": {
+                "id": "ARCA",
+                "name": "Assault Rifle Combat Application System",
+                "year": 2021,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation, ComputerVision, BehaviorModeling",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, CrowdControl, PrivateSecurity",
+                "hover": "name: Assault Rifle Combat Application System; year: 2021; task: Robotics/Navigation, ComputerVision, BehaviorModeling; AI type: Automate; Military use: Operations; Civic use: Policing, CrowdControl, PrivateSecurity",
+                "image": "./assets/noun-target-7619584.png",
+                "color": "#51DBD9"
               }
             },
-            LAW: {
-              metadata: {
-                id: "LAW",
-                name: "Lethal Autonomous Weapons",
-                year: 2021,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Lethal Autonomous Weapons; year: 2021; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-infrared-drone-4284335.png",
-                nounKey: NaN
+            "LAW": {
+              "metadata": {
+                "id": "LAW",
+                "name": "Lethal Autonomous Weapons",
+                "year": 2021,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation,  IntelligentControlSystem",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, CrowdControl, PrivateSecurity",
+                "hover": "name: Lethal Autonomous Weapons; year: 2021; task: Robotics/Navigation,  IntelligentControlSystem; AI type: Automate; Military use: Operations; Civic use: Policing, CrowdControl, PrivateSecurity",
+                "image": "./assets/noun-infrared-drone-4284335.png",
+                "color": "#5186DB"
               }
             },
-            Libya: {
-              metadata: {
-                id: "Libya",
-                name: "Libya",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: Libya; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN
+            "Gotham": {
+              "metadata": {
+                "id": "Gotham",
+                "name": "Gotham",
+                "year": 2021,
+                "currentStatus": "Operation",
+                "type": "DataManagement, AnomalyDetection, BehaviorModeling",
+                "MLTask": "Recognize",
+                "militaryUse": "Command, Logistics, Operations",
+                "civicUse": "Dashboard, ProjectManagement",
+                "hover": "name: Gotham; year: 2021; task: DataManagement, AnomalyDetection, BehaviorModeling; AI type: Recognize; Military use: Command, Logistics, Operations; Civic use: Dashboard, ProjectManagement",
+                "image": "./assets/noun-missile-launcher-2052140.png",
+                "color": "#51B2DB"
               }
             },
-            Gotham: {
-              metadata: {
-                id: "Gotham",
-                name: "Gotham",
-                year: 2021,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Gotham; year: 2021; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-target-data-6432306.png",
-                nounKey: NaN,
-                color: "#51B2DB"
+            "JEDI": {
+              "metadata": {
+                "id": "JEDI",
+                "name": "JEDI",
+                "year": 2021,
+                "currentStatus": "Operation",
+                "type": "DataManagement",
+                "MLTask": "Store",
+                "militaryUse": "Logistics",
+                "civicUse": "CloudComputing, EdgeComputing",
+                "hover": "name: JEDI; year: 2021; task: DataManagement; AI type: Store; Military use: Logistics; Civic use: CloudComputing, EdgeComputing",
+                "image": "./assets/noun-locked-cloud-5565062.png",
+                "color": "#5186DB"
               }
             },
-            Palantir: {
-              metadata: {
-                id: "Palantir",
-                name: "Palantir",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Palantir; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#51B2DB"
+            "FireWeaver": {
+              "metadata": {
+                "id": "FireWeaver",
+                "name": "Fire Weaver",
+                "year": 2020,
+                "currentStatus": "Operation",
+                "type": "MultiAgentSystem, PlanningSystem, RecommenderSystem",
+                "MLTask": "Assign",
+                "militaryUse": "Command",
+                "civicUse": "Unknown",
+                "output": "Action",
+                "hover": "name: Fire Weaver; year: 2020; task: MultiAgentSystem, PlanningSystem, RecommenderSystem; AI type: Assign; Military use: Command; Civic use: Unknown",
+                "image": "./assets/noun-virtual-headset-7137401.png",
+                "color": "#51DBD9"
               }
             },
-            JEDI: {
-              metadata: {
-                id: "JEDI",
-                name: "JEDI",
-                year: 2021,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: JEDI; year: 2021; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-locked-cloud-5565062.png",
-                nounKey: NaN,
-                color: "#5186DB"
+            "FireFactory": {
+              "metadata": {
+                "id": "FireFactory",
+                "name": "Fire Factory",
+                "year": 2020,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation, IntelligentControlSystem",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Unknown",
+                "MLTasks": "Prediction",
+                "hover": "name: Fire Factory; year: 2020; task: Robotics/Navigation, IntelligentControlSystem; AI type: Automate; Military use: Operations; Civic use: Unknown",
+                "image": "./assets/noun-missile-launcher-2052140.png",
+                "color": "#51DBD9"
               }
             },
-            FireWeaver: {
-              metadata: {
-                id: "FireWeaver",
-                name: "Fire Weaver",
-                year: 2020,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: "Action",
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Fire Weaver; year: 2020; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: Action; Impacts: ",
-                image: "./assets/noun-threat-7566001.png",
-                nounKey: NaN,
-                color: "#51DBD9"
+            "DIAS": {
+              "metadata": {
+                "id": "DIAS",
+                "name": "Dialect Recognition Assistant (DIAS)",
+                "year": 2019,
+                "currentStatus": "Operation",
+                "type": "NLP",
+                "MLTask": "Sort",
+                "militaryUse": "Intelligence",
+                "civicUse": "IdentityVerification",
+                "capacity": "AudioProcessing, DialectRecognition",
+                "hover": "name: Dialect Recognition Assistant (DIAS); year: 2019; task: NLP; AI type: Sort; Military use: Intelligence; Civic use: IdentityVerification",
+                "image": "./assets/noun-speech-recognition-1870316.png",
+                "color": "#51DBAB"
               }
             },
-            FireFactory: {
-              metadata: {
-                id: "FireFactory",
-                name: "Fire Factory",
-                year: 2020,
-                currentStatus: "Operation",
-                type: "IntelligentControlSystem",
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Fire Factory; year: 2020; type: IntelligentControlSystem; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-missile-launcher-2052140.png",
-                nounKey: NaN,
-                color: "#51DBD9"
+            "AFRS": {
+              "metadata": {
+                "id": "AFRS",
+                "name": "Automated Facial Recognition System",
+                "year": 2019,
+                "currentStatus": "Operation",
+                "type": "FacialRecognition; ComputerVision",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "IdentityVerification, AppUnlocking, AccessGranting",
+                "capacity": "FaceRecognition",
+                "hover": "name: Automated Facial Recognition System; year: 2019; task: FacialRecognition; ComputerVision; AI type: Recognize; Military use: Intelligence; Civic use: IdentityVerification, AppUnlocking, AccessGranting",
+                "image": "./assets/noun-facial-recognition-4116350.png",
+                "color": "#51B2DB"
               }
             },
-            DIAS: {
-              metadata: {
-                id: "DIAS",
-                name: "DIAS",
-                year: 2019,
-                currentStatus: "Operation",
-                type: "ExpertSystem",
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: "AudioProcessing, DialectRecognition",
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: DIAS; year: 2019; type: ExpertSystem; Military use: ; Civic use: ; Purpose: ; Capabilities: AudioProcessing, DialectRecognition; Outputs: ; Impacts: ",
-                image: "./assets/noun-speech-recognition-1870316.png",
-                nounKey: NaN,
-                color: "#51DBAB"
+            "Starshield": {
+              "metadata": {
+                "id": "Starshield",
+                "name": "Starshield",
+                "year": 2024,
+                "currentStatus": "Operation",
+                "type": "IoT, LocationAwareness",
+                "MLTask": "Capture",
+                "militaryUse": "Intelligence",
+                "civicUse": "InternetAccess, DataDistribution, SecureTransmission",
+                "hover": "name: Starshield; year: 2024; task: IoT, LocationAwareness; AI type: Capture; Military use: Intelligence; Civic use: InternetAccess, DataDistribution, SecureTransmission",
+                "image": "./assets/noun-satelite-5565092.png",
+                "color": "#5186DB"
               }
             },
-            Germany: {
-              metadata: {
-                id: "Germany",
-                name: "Germany",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: Germany; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBAB"
-              }
-            },
-            AFRS: {
-              metadata: {
-                id: "AFRS",
-                name: "AFRS",
-                year: 2019,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: "FaceRecognition",
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: AFRS; year: 2019; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: FaceRecognition; Outputs: ; Impacts: ",
-                image: "./assets/noun-facial-recognition-4116350.png",
-                nounKey: NaN,
-                color: "#51B2DB"
-              }
-            },
-            India: {
-              metadata: {
-                id: "India",
-                name: "India",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: India; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#51B2DB"
-              }
-            },
-            Starshield: {
-              metadata: {
-                id: "Starshield",
-                name: "Starshield",
-                year: 2024,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Starshield; year: 2024; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-satelite-5565092.png",
-                nounKey: NaN,
-                color: "#5186DB"
-              }
-            },
-            Starlink: {
-              metadata: {
-                id: "Starlink",
-                name: "Starlink",
-                year: 2019,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Starlink; year: 2019; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-satelite-5565092.png",
-                nounKey: NaN,
-                color: "#5186DB"
+            "Starlink": {
+              "metadata": {
+                "id": "Starlink",
+                "name": "Starlink",
+                "year": 2019,
+                "currentStatus": "Operation",
+                "type": "IoT, LocationAwareness",
+                "MLTask": "Capture",
+                "militaryUse": "Intelligence",
+                "civicUse": "InternetAccess, DataDistribution",
+                "hover": "name: Starlink; year: 2019; task: IoT, LocationAwareness; AI type: Capture; Military use: Intelligence; Civic use: InternetAccess, DataDistribution",
+                "image": "./assets/noun-satelite-5565092.png",
+                "color": "#5186DB"
               }
             },
             "Pantir-SM": {
-              metadata: {
-                id: "Pantir-SM",
-                name: "Pantir-SM",
-                year: 2019,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: "Classification",
-                purpose: NaN,
-                capacity: NaN,
+              "metadata": {
+                "id": "Pantir-SM",
+                "name": "Pantir-SM",
+                "year": 2019,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation, IntelligentControlSystem, Classification",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, CrowdControl, PrivateSecurity",
+                "MLTasks": "Classification",
                 "vair:technique": "Classification",
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Pantir-SM; year: 2019; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-classification-6860055.png",
-                nounKey: NaN
+                "hover": "name: Pantir-SM; year: 2019; task: Robotics/Navigation, IntelligentControlSystem, Classification; AI type: Automate; Military use: Operations; Civic use: Policing, CrowdControl, PrivateSecurity",
+                "image": "./assets/noun-classification-6860055.png",
+                "color": "#5186DB"
               }
             },
-            Russia: {
-              metadata: {
-                id: "Russia",
-                name: "Russia",
-                type: "Nation",
-                "airo:type": "AIDeployer, AISubject",
-                hover: "name: Russia; stakeholder: Nation; role: AIDeployer, AISubject",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            RedWolf: {
-              metadata: {
-                id: "RedWolf",
-                name: "Red Wolf",
-                year: 2019,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: "FaceRecognition",
-                purpose: NaN,
-                capacity: "FaceRecognition",
+            "RedWolf": {
+              "metadata": {
+                "id": "RedWolf",
+                "name": "Red Wolf",
+                "year": 2019,
+                "currentStatus": "Operation",
+                "type": "FacialRecognition, ComputerVision",
+                "MLTask": "Recognize",
+                "militaryUse": "Operations",
+                "civicUse": "IdentityVerification, Security, Policing",
+                "MLTasks": "Classification",
+                "capacity": "FaceRecognition",
                 "vair:technique": "FaceRecognition",
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Red Wolf; year: 2019; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: FaceRecognition; Outputs: ; Impacts: ",
-                image: "./assets/noun-facial-recognition-4116350.png",
-                nounKey: NaN,
-                color: "#51DBD9"
+                "hover": "name: Red Wolf; year: 2019; task: FacialRecognition, ComputerVision; AI type: Recognize; Military use: Operations; Civic use: IdentityVerification, Security, Policing",
+                "image": "./assets/noun-facial-recognition-4116350.png",
+                "color": "#51DBD9"
               }
             },
-            BlueWolf: {
-              metadata: {
-                id: "BlueWolf",
-                name: "BlueWolf",
-                year: 2018,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: "FaceRecognition",
-                purpose: NaN,
-                capacity: "FaceRecognition",
+            "BlueWolf": {
+              "metadata": {
+                "id": "BlueWolf",
+                "name": "BlueWolf",
+                "year": 2018,
+                "currentStatus": "Operation",
+                "type": "FacialRecognition, ComputerVision",
+                "MLTask": "Recognize",
+                "militaryUse": "Operations",
+                "civicUse": "IdentityVerification, Security, Policing",
+                "MLTasks": "Classification",
+                "capacity": "FaceRecognition",
                 "vair:technique": "FaceRecognition",
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: BlueWolf; year: 2018; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: FaceRecognition; Outputs: ; Impacts: ",
-                image: "./assets/noun-face-id-scan-1890640.png",
-                nounKey: NaN,
-                color: "#51DBD9"
+                "hover": "name: BlueWolf; year: 2018; task: FacialRecognition, ComputerVision; AI type: Recognize; Military use: Operations; Civic use: IdentityVerification, Security, Policing",
+                "image": "./assets/noun-face-id-scan-1890640.png",
+                "color": "#51DBD9"
               }
             },
-            Mabat2000: {
-              metadata: {
-                id: "Mabat2000",
-                name: "Mabat 2000",
-                year: 2018,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Mabat 2000; year: 2018; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-cctv-5477699.png",
-                nounKey: NaN
+            "Mabat2000": {
+              "metadata": {
+                "id": "Mabat2000",
+                "name": "Mabat 2000",
+                "year": 2018,
+                "currentStatus": "Operation",
+                "type": "ComputerVision",
+                "MLTask": "Capture",
+                "militaryUse": "Intelligence",
+                "civicUse": "Surveillance, Policing",
+                "hover": "name: Mabat 2000; year: 2018; task: ComputerVision; AI type: Capture; Military use: Intelligence; Civic use: Surveillance, Policing",
+                "image": "./assets/noun-cctv-5477699.png",
+                "color": "#51DBD9"
               }
             },
-            URSA: {
-              metadata: {
-                id: "URSA",
-                name: "URSA",
-                year: 2018,
-                currentStatus: "Retirement",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: URSA; year: 2018; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-data-science-6432260.png",
-                nounKey: NaN,
-                color: "#5186DB"
+            "URSA": {
+              "metadata": {
+                "id": "URSA",
+                "name": "URSA",
+                "year": 2018,
+                "currentStatus": "Retirement",
+                "type": "LocationAwareness",
+                "MLTask": "Recognize",
+                "militaryUse": "Operations",
+                "civicUse": "Retired",
+                "hover": "name: URSA; year: 2018; task: LocationAwareness; AI type: Recognize; Military use: Operations; Civic use: Retired",
+                "image": "./assets/noun-data-science-6432260.png",
+                "color": "#5186DB"
               }
             },
-            TacNet: {
-              metadata: {
-                id: "TacNet",
-                name: "TacNet",
-                year: 2017,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: "Command&Control",
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: TacNet; year: 2017; type: ; Military use: Command&Control; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-surveillance-monitor-6831349.png",
-                nounKey: NaN,
-                color: "#51DBAB"
+            "TacNet": {
+              "metadata": {
+                "id": "TacNet",
+                "name": "TacNet",
+                "year": 2017,
+                "currentStatus": "Operation",
+                "type": "MultiAgentSystem, PlanningSystem, RecommenderSystem",
+                "MLTask": "Assign",
+                "militaryUse": "Command",
+                "civicUse": "Policing, CrowdControl, PrivateSecurity",
+                "hover": "name: TacNet; year: 2017; task: MultiAgentSystem, PlanningSystem, RecommenderSystem; AI type: Assign; Military use: Command; Civic use: Policing, CrowdControl, PrivateSecurity",
+                "image": "./assets/noun-surveillance-monitor-6831349.png",
+                "color": "#51DBAB"
               }
             },
-            Bylina: {
-              metadata: {
-                id: "Bylina",
-                name: "Bylina",
-                year: 2017,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Bylina; year: 2017; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-threat-7566001.png",
-                nounKey: NaN
+            "Bylina": {
+              "metadata": {
+                "id": "Bylina",
+                "name": "Bylina",
+                "year": 2017,
+                "currentStatus": "Operation",
+                "type": "PredictiveAnalytics",
+                "MLTask": "Predict",
+                "militaryUse": "Command",
+                "civicUse": "Unknown",
+                "hover": "name: Bylina; year: 2017; task: PredictiveAnalytics; AI type: Predict; Military use: Command; Civic use: Unknown",
+                "image": "./assets/noun-earthquake-damage-6326583.png",
+                "color": "#5186DB"
               }
             },
-            Syria: {
-              metadata: {
-                id: "Syria",
-                name: "Syria",
-                type: "Nation",
-                "airo:type": "AISubject",
-                hover: "name: Syria; stakeholder: Nation; role: AISubject",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            Maven: {
-              metadata: {
-                id: "Maven",
-                name: "Project Maven",
-                year: 2016,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: "ObjectDetection",
-                purpose: NaN,
-                capacity: "ObjectDetection",
+            "Maven": {
+              "metadata": {
+                "id": "Maven",
+                "name": "Maven Smart System",
+                "year": 2016,
+                "currentStatus": "Operation",
+                "type": "ComputerVision",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "Policing, Security, BorderPatrol, ScientificResearch",
+                "MLTasks": "ObjectDetection",
+                "capacity": "ObjectDetection",
                 "vair:technique": "ObjectDetection",
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Project Maven; year: 2016; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ObjectDetection; Outputs: ; Impacts: ",
-                image: "./assets/noun-object-recognition-6963419.png",
-                nounKey: NaN
+                "hover": "name: Maven Smart System; year: 2016; task: ComputerVision; AI type: Recognize; Military use: Intelligence; Civic use: Policing, Security, BorderPatrol, ScientificResearch",
+                "image": "./assets/noun-object-recognition-6963419.png",
+                "color": "#5186DB"
               }
             },
-            PackBot: {
-              metadata: {
-                id: "PackBot",
-                name: "PackBot",
-                year: 2016,
-                currentStatus: "Operation",
-                type: "ServiceRobot",
-                militaryUse: "Robot",
-                civicUse: "Robot",
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: PackBot; year: 2016; type: ServiceRobot; Military use: Robot; Civic use: Robot; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-bomb-defusing-robot-1036305.png",
-                nounKey: NaN,
-                color: "#5186DB"
+            "PackBot": {
+              "metadata": {
+                "id": "PackBot",
+                "name": "PackBot",
+                "year": 2016,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "SmartHome, Security",
+                "hover": "name: PackBot; year: 2016; task: Robotics/Navigation; AI type: Automate; Military use: Operations; Civic use: SmartHome, Security",
+                "image": "./assets/noun-bomb-defusing-robot-1036305.png",
+                "color": "#5186DB"
               }
             },
-            GISArta: {
-              metadata: {
-                id: "GISArta",
-                name: "GIS Arta",
-                year: 2014,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
+            "GISArta": {
+              "metadata": {
+                "id": "GISArta",
+                "name": "GIS Arta",
+                "year": 2014,
+                "currentStatus": "Operation",
+                "type": "PlanningSystem, MultiAgentSystem, RecommenderSystem",
+                "MLTask": "Assign",
+                "militaryUse": "Logistics",
+                "civicUse": "VehicleTasking, Logistics",
                 "vair:technique": "dispatch",
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: GIS Arta; year: 2014; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-threat-7566001.png",
-                nounKey: NaN,
-                color: "#51B2DB"
+                "hover": "name: GIS Arta; year: 2014; task: PlanningSystem, MultiAgentSystem, RecommenderSystem; AI type: Assign; Military use: Logistics; Civic use: VehicleTasking, Logistics",
+                "image": "./assets/noun-threat-7566001.png",
+                "color": "#51B2DB"
               }
             },
-            IrisGuard: {
-              metadata: {
-                id: "IrisGuard",
-                name: "IrisGuard",
-                year: 2013,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: "BiometricIdentification",
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: IrisGuard; year: 2013; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: BiometricIdentification; Outputs: ; Impacts: ",
-                image: "./assets/noun-iris-recognition-6831344.png",
-                nounKey: "irisRecognition"
-              }
-            },
-            Jordan: {
-              metadata: {
-                id: "Jordan",
-                name: "Jordan",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: Jordan; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN
+            "IrisGuard": {
+              "metadata": {
+                "id": "IrisGuard",
+                "name": "IrisGuard",
+                "year": 2013,
+                "currentStatus": "Operation",
+                "type": "ComputerVision",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "IdentityVerification, AppUnlocking, AccessGranting",
+                "capacity": "BiometricIdentification",
+                "hover": "name: IrisGuard; year: 2013; task: ComputerVision; AI type: Recognize; Military use: Intelligence; Civic use: IdentityVerification, AppUnlocking, AccessGranting",
+                "image": "./assets/noun-iris-recognition-6831344.png",
+                "nounKey": "biometric",
+                "color": "#51DBD9"
               }
             },
             "Skynet-US": {
-              metadata: {
-                id: "Skynet-US",
-                name: "Skynet-US",
-                year: 2012,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Skynet-US; year: 2012; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-digital-footprint-6806678.png",
-                nounKey: NaN,
-                color: "#5186DB"
+              "metadata": {
+                "id": "Skynet-US",
+                "name": "Skynet-US",
+                "year": 2012,
+                "currentStatus": "Operation",
+                "type": "AnomalyDetection, MultiAgentSystem, BehaviorModeling, RecommenderSystem",
+                "MLTask": "Predict",
+                "militaryUse": "Intelligence",
+                "civicUse": "DataBrokers, Marketing, BehaviorEvaluation",
+                "hover": "name: Skynet-US; year: 2012; task: AnomalyDetection, MultiAgentSystem, BehaviorModeling, RecommenderSystem; AI type: Predict; Military use: Intelligence; Civic use: DataBrokers, Marketing, BehaviorEvaluation",
+                "image": "./assets/noun-digital-footprint-6806678.png",
+                "color": "#5186DB"
               }
             },
-            RobotRiotControl: {
-              metadata: {
-                id: "RobotRiotControl",
-                name: "Robot Riot Control",
-                year: 2011,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Robot Riot Control; year: 2011; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-riot-control-national-guards-1584300.png",
-                nounKey: "police",
-                color: "#009ADB"
+            "RobotRiotControl": {
+              "metadata": {
+                "id": "RobotRiotControl",
+                "name": "Robot Riot Control",
+                "year": 2011,
+                "currentStatus": "Operation",
+                "type": "AnomalyDetection, LocationAwareness, BehaviorModeling",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "Policing, Security, BorderPatrol",
+                "hover": "name: Robot Riot Control; year: 2011; task: AnomalyDetection, LocationAwareness, BehaviorModeling; AI type: Recognize; Military use: Intelligence; Civic use: Policing, Security, BorderPatrol",
+                "image": "./assets/noun-riot-control-national-guards-1584300.png",
+                "nounKey": "police",
+                "color": "#009ADB"
               }
             },
-            China: {
-              metadata: {
-                id: "China",
-                name: "China",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: China; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#009ADB"
+            "PrisonGuard": {
+              "metadata": {
+                "id": "PrisonGuard",
+                "name": "Prison Guard",
+                "year": 2011,
+                "currentStatus": "Operation",
+                "type": "AnomalyDetection, LocationAwareness, BehaviorModeling",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "Policing, Security, BorderPatrol",
+                "hover": "name: Prison Guard; year: 2011; task: AnomalyDetection, LocationAwareness, BehaviorModeling; AI type: Recognize; Military use: Intelligence; Civic use: Policing, Security, BorderPatrol",
+                "image": "./assets/noun-police-robot-1119907.png",
+                "color": "#009ADB"
               }
             },
-            PrisonGuard: {
-              metadata: {
-                id: "PrisonGuard",
-                name: "Prison Guard",
-                year: 2011,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Prison Guard; year: 2011; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-police-robot-1119907.png",
-                nounKey: NaN,
-                color: "#009ADB"
+            "Pegasus": {
+              "metadata": {
+                "id": "Pegasus",
+                "name": "Pegasus",
+                "year": 2011,
+                "currentStatus": "Operation",
+                "type": "AnomalyDetection, BehaviorModeling",
+                "MLTask": "Capture",
+                "militaryUse": "Intelligence",
+                "civicUse": "BehaviorEvaluation, Surveillance",
+                "hover": "name: Pegasus; year: 2011; task: AnomalyDetection, BehaviorModeling; AI type: Capture; Military use: Intelligence; Civic use: BehaviorEvaluation, Surveillance",
+                "image": "./assets/noun-digital-footprint-6806678.png",
+                "color": "#51DBD9"
               }
             },
-            SouthKorea: {
-              metadata: {
-                id: "SouthKorea",
-                name: "South Korea",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: South Korea; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#009ADB"
+            "SentryTech": {
+              "metadata": {
+                "id": "SentryTech",
+                "name": "Sentry-Tech",
+                "year": 2010,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation, IntelligentControlSystem",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, Security, BorderPatrol",
+                "hover": "name: Sentry-Tech; year: 2010; task: Robotics/Navigation, IntelligentControlSystem; AI type: Automate; Military use: Operations; Civic use: Policing, Security, BorderPatrol",
+                "image": "./assets/noun-turret-6749967.png",
+                "color": "#51DBD9"
               }
             },
-            Pegasus: {
-              metadata: {
-                id: "Pegasus",
-                name: "Pegasus",
-                year: 2011,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Pegasus; year: 2011; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-digital-footprint-6806678.png",
-                nounKey: NaN,
-                color: "#51DBD9"
+            "SuperAegis": {
+              "metadata": {
+                "id": "SuperAegis",
+                "name": "Super Aegis",
+                "year": 2010,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation, IntelligentControlSystem",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, Security, BorderPatrol",
+                "hover": "name: Super Aegis; year: 2010; task: Robotics/Navigation, IntelligentControlSystem; AI type: Automate; Military use: Operations; Civic use: Policing, Security, BorderPatrol",
+                "image": "./assets/noun-turret-6749967.png",
+                "color": "#009ADB"
               }
             },
-            SentryTech: {
-              metadata: {
-                id: "SentryTech",
-                name: "Sentry-Tech",
-                year: 2010,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Sentry-Tech; year: 2010; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-turret-6749967.png",
-                nounKey: NaN,
-                color: "#51DBD9"
+            "SentryRobot": {
+              "metadata": {
+                "id": "SentryRobot",
+                "name": "Sentry Robot",
+                "year": 2010,
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation, IntelligentControlSystem",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, Security, BorderPatrol",
+                "hover": "name: Sentry Robot; year: 2010; task: Robotics/Navigation, IntelligentControlSystem; AI type: Automate; Military use: Operations; Civic use: Policing, Security, BorderPatrol",
+                "image": "./assets/noun-turret-6749967.png",
+                "color": "#009ADB"
               }
             },
-            SuperAegis: {
-              metadata: {
-                id: "SuperAegis",
-                name: "Super Aegis",
-                year: 2010,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Super Aegis; year: 2010; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-turret-6749967.png",
-                nounKey: NaN,
-                color: "#009ADB"
+            "PRISM": {
+              "metadata": {
+                "id": "PRISM",
+                "name": "PRISM/XKEYSCORE",
+                "year": 2007,
+                "currentStatus": "Retirement",
+                "type": "DataManagement, AnomalyDetection",
+                "MLTask": "Capture, Store",
+                "militaryUse": "Intelligence",
+                "civicUse": "BehaviorEvaluation, Surveillance, Marketing, DataBrokers",
+                "hover": "name: PRISM/XKEYSCORE; year: 2007; task: DataManagement, AnomalyDetection; AI type: Capture, Store; Military use: Intelligence; Civic use: BehaviorEvaluation, Surveillance, Marketing, DataBrokers",
+                "image": "./assets/noun-digital-footprint-6806678.png",
+                "color": "#5186DB"
               }
             },
-            SentryRobot: {
-              metadata: {
-                id: "SentryRobot",
-                name: "Sentry Robot",
-                year: 2010,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Sentry Robot; year: 2010; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-turret-6749967.png",
-                nounKey: NaN,
-                color: "#009ADB"
+            "DynaSpeak": {
+              "metadata": {
+                "id": "DynaSpeak",
+                "name": "DynaSpeak",
+                "year": 2006,
+                "currentStatus": "Retirement",
+                "type": "NLP",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "NaturalLanguageProcessing, TranslationApps",
+                "hover": "name: DynaSpeak; year: 2006; task: NLP; AI type: Recognize; Military use: Intelligence; Civic use: NaturalLanguageProcessing, TranslationApps",
+                "image": "./assets/noun-speech-recognition-1870316.png",
+                "color": "#5186DB"
               }
             },
-            PRISM: {
-              metadata: {
-                id: "PRISM",
-                name: "PRISM/XKEYSCORE",
-                year: 2007,
-                currentStatus: "Retirement",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: PRISM/XKEYSCORE; year: 2007; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-digital-footprint-6806678.png",
-                nounKey: NaN,
-                color: "#5186DB"
+            "CALO": {
+              "metadata": {
+                "id": "CALO",
+                "name": "CALO",
+                "year": 2003,
+                "currentStatus": "Retirement",
+                "type": "Agent",
+                "MLTask": "Generate",
+                "militaryUse": "Command",
+                "civicUse": "AIAssistants",
+                "hover": "name: CALO; year: 2003; task: Agent; AI type: Generate; Military use: Command; Civic use: AIAssistants",
+                "image": "./assets/noun-chatbot-7107716.png",
+                "nounKey": "chatbot",
+                "color": "#5186DB"
               }
             },
-            DynaSpeak: {
-              metadata: {
-                id: "DynaSpeak",
-                name: "DynaSpeak",
-                year: 2006,
-                currentStatus: "Retirement",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: DynaSpeak; year: 2006; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-speech-recognition-1870316.png",
-                nounKey: NaN,
-                color: "#5186DB"
+            "GoldenShield": {
+              "metadata": {
+                "id": "GoldenShield",
+                "name": "Golden Shield",
+                "year": 2003,
+                "currentStatus": "Operation",
+                "type": "DataManagement, AnomalyDetection",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "BehaviorEvaluation, Surveillance, Marketing, DataBrokers",
+                "hover": "name: Golden Shield; year: 2003; task: DataManagement, AnomalyDetection; AI type: Recognize; Military use: Intelligence; Civic use: BehaviorEvaluation, Surveillance, Marketing, DataBrokers",
+                "image": "./assets/noun-cctv-5477699.png",
+                "color": "#009ADB"
               }
             },
-            CALO: {
-              metadata: {
-                id: "CALO",
-                name: "CALO",
-                year: 2003,
-                currentStatus: "Retirement",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: CALO; year: 2003; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-surveillance-monitor-6831349.png",
-                nounKey: "chatbot",
-                color: "#5186DB"
-              }
-            },
-            GoldenShield: {
-              metadata: {
-                id: "GoldenShield",
-                name: "Golden Shield",
-                year: 2003,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Golden Shield; year: 2003; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-cctv-5477699.png",
-                nounKey: NaN,
-                color: "#009ADB"
-              }
-            },
-            SharpEyes: {
-              metadata: {
-                id: "SharpEyes",
-                name: "Sharp Eyes",
-                year: 2003,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Sharp Eyes; year: 2003; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-cctv-5477699.png",
-                nounKey: NaN,
-                color: "#009ADB"
+            "SharpEyes": {
+              "metadata": {
+                "id": "SharpEyes",
+                "name": "Sharp Eyes",
+                "year": 2003,
+                "currentStatus": "Operation",
+                "type": "FacialRecognition, ComputerVision",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "IdentityVerification, Security, Policing",
+                "hover": "name: Sharp Eyes; year: 2003; task: FacialRecognition, ComputerVision; AI type: Recognize; Military use: Intelligence; Civic use: IdentityVerification, Security, Policing",
+                "image": "./assets/noun-cctv-5477699.png",
+                "color": "#009ADB"
               }
             },
             "Skynet-PRC": {
-              metadata: {
-                id: "Skynet-PRC",
-                name: "Skynet-PRC",
-                year: 2003,
-                currentStatus: "Operation",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Skynet-PRC; year: 2003; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-cctv-5477699.png",
-                nounKey: NaN,
-                color: "#009ADB"
+              "metadata": {
+                "id": "Skynet-PRC",
+                "name": "Skynet-PRC",
+                "year": 2003,
+                "currentStatus": "Operation",
+                "type": "LocationAwareness",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "Security, Policing, LocationAnalytics",
+                "hover": "name: Skynet-PRC; year: 2003; task: LocationAwareness; AI type: Recognize; Military use: Intelligence; Civic use: Security, Policing, LocationAnalytics",
+                "image": "./assets/noun-cctv-5477699.png",
+                "color": "#009ADB"
               }
             },
-            UNHCR: {
-              metadata: {
-                id: "UNHCR",
-                name: "UNHCR",
-                type: "Military",
-                "airo:type": "AIDeveloper",
-                hover: "name: UNHCR; stakeholder: Military; role: AIDeveloper; notes:The Office of the United Nations High Commissioner for Refugees is a United Nations agency mandated to aid and protect refugees, forcibly displaced communities, and stateless people, and to assist in their voluntary repatriation, local integration or resettlement to a third country. (Wikipedia)",
-                image: "./assets/noun-museum-198296.png",
-                people: "The Office of the United Nations High Commissioner for Refugees is a United Nations agency mandated to aid and protect refugees, forcibly displaced communities, and stateless people, and to assist in their voluntary repatriation, local integration or resettlement to a third country. (Wikipedia)",
-                details: NaN
+            "Lattice": {
+              "metadata": {
+                "id": "Lattice",
+                "name": "Lattice",
+                "year": 2025,
+                "currentStatus": "Deployment",
+                "type": "PlanningSystem, MultiAgentSystem, RecommenderSystem",
+                "MLTask": "Assign",
+                "militaryUse": "Command",
+                "civicUse": "Policing, ScientificResearch",
+                "MLTasks": "ComputerVision, Classification, Tracking, Detection, EdgeComputing, SignalAnalysis, ObjectRecognition",
+                "output": "Action, Content, Decision",
+                "impact": "PhysicalInjury, Overreliance, DistortionInHumanBehavior",
+                "hover": "name: Lattice; year: 2025; task: PlanningSystem, MultiAgentSystem, RecommenderSystem; AI type: Assign; Military use: Command; Civic use: Policing, ScientificResearch",
+                "image": "./assets/noun-surveillance-monitor-6831349.png",
+                "color": "#5186DB"
               }
             },
-            Azerbaijan: {
-              metadata: {
-                id: "Azerbaijan",
-                name: "Azerbaijan",
-                type: "Nation",
+            "Foundry": {
+              "metadata": {
+                "id": "Foundry",
+                "name": "Foundry",
+                "year": 2022,
+                "currentStatus": "Operation",
+                "type": "DataManagement, Agent",
+                "MLTask": "Store",
+                "militaryUse": "Intelligence",
+                "civicUse": "Policing, PrivateSecurity, BorderPatrol, BehaviorEvaluation, Surveillance, Marketing, DataBrokers",
+                "MLTasks": "SemanticSearch, Ontologies, DataAnalysis",
+                "hover": "name: Foundry; year: 2022; task: DataManagement, Agent; AI type: Store; Military use: Intelligence; Civic use: Policing, PrivateSecurity, BorderPatrol, BehaviorEvaluation, Surveillance, Marketing, DataBrokers",
+                "image": "./assets/noun-ai-training-data-2985134.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Fortify": {
+              "metadata": {
+                "id": "Fortify",
+                "name": "(Mobile) Fortify",
+                "year": 2020,
+                "currentStatus": "Operation",
+                "type": "DataManagement, FacialRecognition, ComputerVision",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "IdentityVerification, Security, Policing",
+                "MLTasks": "Classification",
+                "capacity": "FaceRecognition",
+                "hover": "name: (Mobile) Fortify; year: 2020; task: DataManagement, FacialRecognition, ComputerVision; AI type: Recognize; Military use: Intelligence; Civic use: IdentityVerification, Security, Policing",
+                "image": "./assets/noun-facial-recognition-4116350.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Sentry": {
+              "metadata": {
+                "id": "Sentry",
+                "name": "Sentry",
+                "year": 2018,
+                "currentStatus": "Operation",
+                "type": "IntelligentControlSystem, IoT",
+                "MLTask": "Automate",
+                "militaryUse": "Intelligence",
+                "civicUse": "BorderPatrol, Policing",
+                "hover": "name: Sentry; year: 2018; task: IntelligentControlSystem, IoT; AI type: Automate; Military use: Intelligence; Civic use: BorderPatrol, Policing",
+                "image": "./assets/noun-tower-111722.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Mantacus": {
+              "metadata": {
+                "id": "Mantacus",
+                "name": "Mantacus",
+                "year": 2022,
+                "currentStatus": "Development",
+                "type": "ComputerVision, AnomalyDetection",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "Policing, CrowdControl, PrivateSecurity",
+                "MLTasks": "SignalAnalysis",
+                "capacity": "ObjectRecognition",
+                "output": "Decision",
+                "impact": "Overreliance, WellbeingImpact",
+                "hover": "name: Mantacus; year: 2022; task: ComputerVision, AnomalyDetection; AI type: Recognize; Military use: Intelligence; Civic use: Policing, CrowdControl, PrivateSecurity",
+                "image": "./assets/noun-pose-estimation-6860082.png",
+                "color": "#51DBAB"
+              }
+            },
+            "AIVerse": {
+              "metadata": {
+                "id": "AIVerse",
+                "name": "AIVerse",
+                "year": 2021,
+                "currentStatus": "Deployment",
+                "type": "GenerativeAI",
+                "MLTask": "Generate",
+                "militaryUse": "Command",
+                "civicUse": "SmartHome, Security",
+                "MLTasks": "SyntheticData, ObjectRecognition, PoseRecognition, Classification",
+                "purpose": "Monitoring, DetectingIndividuals",
+                "capacity": "ObjectDetection, PoseEstimation, Classification",
+                "hover": "name: AIVerse; year: 2021; task: GenerativeAI; AI type: Generate; Military use: Command; Civic use: SmartHome, Security",
+                "image": "./assets/noun-classification-6860055.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Vector": {
+              "metadata": {
+                "id": "Vector",
+                "name": "Vector",
+                "year": 2020,
+                "currentStatus": "Deployment",
+                "type": "Robotics/Navigation",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, Surveillance",
+                "output": "Action, Content",
+                "impact": "PhysicalInjury, WellbeingImpact, PsychologicalHarm",
+                "hover": "name: Vector; year: 2020; task: Robotics/Navigation; AI type: Automate; Military use: Operations; Civic use: Policing, Surveillance",
+                "image": "./assets/noun-drone-strike-75130.png",
+                "color": "#51DBAB"
+              }
+            },
+            "EagleEye": {
+              "metadata": {
+                "id": "EagleEye",
+                "name": "Eagle Eye / SBMC Next",
+                "year": 2025,
+                "currentStatus": "Development",
+                "type": "ComputerVision",
+                "MLTask": "Recognize",
+                "militaryUse": "Intelligence",
+                "civicUse": "AR, VR, Games",
+                "MLTasks": "ObjectClassification, PoseEstimation",
+                "hover": "name: Eagle Eye / SBMC Next; year: 2025; task: ComputerVision; AI type: Recognize; Military use: Intelligence; Civic use: AR, VR, Games",
+                "image": "./assets/noun-virtual-headset-7137401.png",
+                "color": "#5186DB"
+              }
+            },
+            "Thunderforge": {
+              "metadata": {
+                "id": "Thunderforge",
+                "name": "Project Thunderforge",
+                "year": 2025,
+                "currentStatus": "Development",
+                "type": "Agent, MultiAgentSystem, PlanningSystem",
+                "MLTask": "Generate",
+                "militaryUse": "Command",
+                "civicUse": "AIAssistants, Chatbots",
+                "hover": "name: Project Thunderforge; year: 2025; task: Agent, MultiAgentSystem, PlanningSystem; AI type: Generate; Military use: Command; Civic use: AIAssistants, Chatbots",
+                "image": "./assets/noun-chatbot-7107716.png",
+                "color": "#515ADB"
+              }
+            },
+            "Jericho": {
+              "metadata": {
+                "id": "Jericho",
+                "name": "Jericho, StrikeWeb",
+                "year": 2021,
+                "currentStatus": "Deployment",
+                "type": "IntelligentControlSystem, IoT",
+                "MLTask": "Automate",
+                "militaryUse": "Intelligence",
+                "civicUse": "SmartHome, EdgeComputing",
+                "hover": "name: Jericho, StrikeWeb; year: 2021; task: IntelligentControlSystem, IoT; AI type: Automate; Military use: Intelligence; Civic use: SmartHome, EdgeComputing",
+                "image": "./assets/noun-tower-111722.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Atlas": {
+              "metadata": {
+                "id": "Atlas",
+                "name": "Atlas",
+                "year": "n.d.",
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, CrowdControl, PrivateSecurity, ScientificResearch",
+                "MLTasks": "SignalAnalysis, ObjectDetection, Classification",
+                "hover": "name: Atlas; year: n.d.; task: Robotics/Navigation; AI type: Automate; Military use: Operations; Civic use: Policing, CrowdControl, PrivateSecurity, ScientificResearch",
+                "image": "./assets/noun-drone-strike-75130.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Mithra": {
+              "metadata": {
+                "id": "Mithra",
+                "name": "MithraOS",
+                "year": 2022,
+                "currentStatus": "Deployment",
+                "type": "Robotics/Navigation",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "SmartHome, Security",
+                "hover": "name: MithraOS; year: 2022; task: Robotics/Navigation; AI type: Automate; Military use: Operations; Civic use: SmartHome, Security",
+                "image": "./assets/noun-bomb-defusing-robot-1036305.png"
+              }
+            },
+            "Donovan": {
+              "metadata": {
+                "id": "Donovan",
+                "name": "Donovan",
+                "year": 2023,
+                "currentStatus": "Development",
+                "type": "Agent",
+                "MLTask": "Generate",
+                "militaryUse": "Command",
+                "civicUse": "AIAssistants, Chatbots",
+                "MLTasks": "TextGeneration, TransformerModel, AgentAction, Automation",
+                "impact": "DistortionInHumanBehavior, Overreliance, WellbeingImpact",
+                "hover": "name: Donovan; year: 2023; task: Agent; AI type: Generate; Military use: Command; Civic use: AIAssistants, Chatbots",
+                "image": "./assets/noun-chatbot-7107716.png",
+                "nounKey": "assistant",
+                "color": "#5186DB"
+              }
+            },
+            "Hivemind": {
+              "metadata": {
+                "id": "Hivemind",
+                "name": "Hivemind",
+                "year": 2015,
+                "currentStatus": "Deployment",
+                "type": "Agent, Robotics/Navigation",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, Security, BorderPatrol",
+                "hover": "name: Hivemind; year: 2015; task: Agent, Robotics/Navigation; AI type: Automate; Military use: Operations; Civic use: Policing, Security, BorderPatrol",
+                "image": "./assets/noun-drone-strike-75130.png",
+                "color": "#5186DB"
+              }
+            },
+            "Centaur": {
+              "metadata": {
+                "id": "Centaur",
+                "name": "Centaur",
+                "year": 2024,
+                "currentStatus": "Deployment",
+                "type": "Agent, Robotics/Navigation",
+                "MLTask": "Automate",
+                "militaryUse": "Operations",
+                "civicUse": "Policing, Security, BorderPatrol",
+                "hover": "name: Centaur; year: 2024; task: Agent, Robotics/Navigation; AI type: Automate; Military use: Operations; Civic use: Policing, Security, BorderPatrol",
+                "image": "./assets/noun-drone-strike-75130.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Altra": {
+              "metadata": {
+                "id": "Altra",
+                "name": "Altra",
+                "year": "n.d.",
+                "currentStatus": "Operation",
+                "type": "Robotics/Navigation",
+                "MLTask": "Automate",
+                "militaryUse": "Command",
+                "civicUse": "Policing, Security, BorderPatrol",
+                "hover": "name: Altra; year: n.d.; task: Robotics/Navigation; AI type: Automate; Military use: Command; Civic use: Policing, Security, BorderPatrol",
+                "image": "./assets/noun-drone-strike-75130.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Claude": {
+              "metadata": {
+                "id": "Claude",
+                "name": "Claude",
+                "year": 2023,
+                "currentStatus": "Operation",
+                "type": "Generative",
+                "hover": "name: Claude; year: 2023; type: Generative",
+                "image": "./assets/noun-text-generator-6059191.png",
+                "nounKey": "textgenerator",
+                "color": "#51B2DB"
+              }
+            },
+            "Roomba": {
+              "metadata": {
+                "id": "Roomba",
+                "name": "Roomba",
+                "year": 2002,
+                "currentStatus": "Operation",
+                "type": "IoT",
+                "hover": "name: Roomba; year: 2002; type: IoT",
+                "image": "./assets/noun-robot-vacuum-6793770.png",
+                "nounKey": "smartHome",
+                "color": "#5186DB"
+              }
+            },
+            "Llama": {
+              "metadata": {
+                "id": "Llama",
+                "name": "Llama",
+                "year": 2023,
+                "currentStatus": "Operation",
+                "type": "Generative",
+                "hover": "name: Llama; year: 2023; type: Generative",
+                "image": "./assets/noun-text-generator-6059191.png",
+                "nounKey": "textgenerator",
+                "color": "#515ADB"
+              }
+            },
+            "Facebook": {
+              "metadata": {
+                "id": "Facebook",
+                "name": "Facebook",
+                "year": 2004,
+                "currentStatus": "Operation",
+                "type": "Social",
+                "hover": "name: Facebook; year: 2004; type: Social",
+                "image": "./assets/noun-social-media-platform-7481620.png",
+                "nounKey": "platform",
+                "color": "#515ADB"
+              }
+            },
+            "WhatsApp": {
+              "metadata": {
+                "id": "WhatsApp",
+                "name": "WhatsApp",
+                "year": 2009,
+                "currentStatus": "Operation",
+                "type": "Social",
+                "hover": "name: WhatsApp; year: 2009; type: Social",
+                "image": "./assets/noun-social-media-platform-7481620.png",
+                "nounKey": "platform",
+                "color": "#515ADB"
+              }
+            },
+            "ChatGPT": {
+              "metadata": {
+                "id": "ChatGPT",
+                "name": "ChatGPT",
+                "year": 2022,
+                "currentStatus": "Operation",
+                "type": "Generative",
+                "hover": "name: ChatGPT; year: 2022; type: Generative",
+                "image": "./assets/noun-text-generator-6059191.png",
+                "nounKey": "textgenerator",
+                "color": "#5186DB"
+              }
+            },
+            "Gemini": {
+              "metadata": {
+                "id": "Gemini",
+                "name": "Gemini/Bard",
+                "year": 2024,
+                "currentStatus": "Operation",
+                "type": "Generative",
+                "hover": "name: Gemini/Bard; year: 2024; type: Generative",
+                "image": "./assets/noun-text-generator-6059191.png",
+                "nounKey": "textgenerator",
+                "color": "#51DBD9"
+              }
+            },
+            "DoorDash": {
+              "metadata": {
+                "id": "DoorDash",
+                "name": "DoorDash",
+                "year": 2012,
+                "currentStatus": "Operation",
+                "type": "App",
+                "hover": "name: DoorDash; year: 2012; type: App",
+                "image": "./assets/noun-social-media-platform-7481620.png",
+                "nounKey": "logistics",
+                "color": "#51DBAB"
+              }
+            },
+            "Oculus": {
+              "metadata": {
+                "id": "Oculus",
+                "name": "Oculus Rift",
+                "year": 2012,
+                "currentStatus": "Operation",
+                "type": "XR",
+                "hover": "name: Oculus Rift; year: 2012; type: XR",
+                "image": "./assets/noun-virtual-headset-7137401.png",
+                "nounKey": "VR",
+                "color": "#5186DB"
+              }
+            },
+            "Hololens": {
+              "metadata": {
+                "id": "Hololens",
+                "name": "Hololens 2",
+                "year": 2016,
+                "currentStatus": "Operation",
+                "type": "XR",
+                "hover": "name: Hololens 2; year: 2016; type: XR",
+                "image": "./assets/noun-virtual-headset-7137401.png",
+                "nounKey": "AR",
+                "color": "#5186DB"
+              }
+            },
+            "Vertex": {
+              "metadata": {
+                "id": "Vertex",
+                "name": "Vertex",
+                "year": 2019,
+                "currentStatus": "Development",
+                "type": "Storage",
+                "hover": "name: Vertex; year: 2019; type: Storage",
+                "image": "./assets/noun-locked-cloud-5565062.png",
+                "nounKey": "cloud",
+                "color": "#51DBD9"
+              }
+            },
+            "Pokemon": {
+              "metadata": {
+                "id": "Pokemon",
+                "name": "Pokemon Go",
+                "year": 2016,
+                "currentStatus": "Operation",
+                "type": "XR",
+                "hover": "name: Pokemon Go; year: 2016; type: XR",
+                "image": "./assets/noun-photogrammetry-4284363.png",
+                "nounKey": "game",
+                "color": "#5186DB"
+              }
+            },
+            "Siri": {
+              "metadata": {
+                "id": "Siri",
+                "name": "Siri",
+                "year": 2011,
+                "currentStatus": "Operation",
+                "type": "Agent",
+                "hover": "name: Siri; year: 2011; type: Agent",
+                "image": "./assets/noun-chatbot-7107716.png",
+                "nounKey": "assistant",
+                "color": "#5186DB"
+              }
+            },
+            "Medicare": {
+              "metadata": {
+                "id": "Medicare",
+                "name": "US Medicare Fraud Detection (CMS)",
+                "year": 2023,
+                "currentStatus": "Operation",
+                "type": "App",
+                "hover": "name: US Medicare Fraud Detection (CMS); year: 2023; type: App",
+                "image": "./assets/noun-health-insurance-7667596.png",
+                "nounKey": "system",
+                "color": "#5186DB"
+              }
+            },
+            "Paypal": {
+              "metadata": {
+                "id": "Paypal",
+                "name": "Paypal",
+                "year": 1998,
+                "currentStatus": "Operation",
+                "type": "App",
+                "hover": "name: Paypal; year: 1998; type: App",
+                "image": "./assets/noun-software-industry-198331.png",
+                "nounKey": "platform",
+                "color": "#51B2DB"
+              }
+            },
+            "Spotify": {
+              "metadata": {
+                "id": "Spotify",
+                "name": "Spotify",
+                "year": 2006,
+                "currentStatus": "Operation",
+                "type": "App",
+                "hover": "name: Spotify; year: 2006; type: App",
+                "image": "./assets/noun-social-media-platform-7481620.png",
+                "nounKey": "platform",
+                "color": "#51DBAB"
+              }
+            },
+            "Twitter": {
+              "metadata": {
+                "id": "Twitter",
+                "name": "Twitter/X",
+                "year": 2006,
+                "currentStatus": "Operation",
+                "type": "Social",
+                "hover": "name: Twitter/X; year: 2006; type: Social",
+                "image": "./assets/noun-social-media-platform-7481620.png",
+                "nounKey": "platform",
+                "color": "#5186DB"
+              }
+            },
+            "Ring": {
+              "metadata": {
+                "id": "Ring",
+                "name": "Ring",
+                "year": 2013,
+                "currentStatus": "Operation",
+                "type": "Utility",
+                "hover": "name: Ring; year: 2013; type: Utility",
+                "image": "./assets/noun-cctv-5477699.png",
+                "nounKey": "surveillanceCamera",
+                "color": "#51B2DB"
+              }
+            },
+            "Citizen": {
+              "metadata": {
+                "id": "Citizen",
+                "name": "Citizen",
+                "year": 2017,
+                "currentStatus": "Operation",
+                "type": "Social",
+                "hover": "name: Citizen; year: 2017; type: Social",
+                "image": "./assets/noun-social-media-platform-7481620.png",
+                "nounKey": "platform",
+                "color": "#51B2DB"
+              }
+            },
+            "Outlier": {
+              "metadata": {
+                "id": "Outlier",
+                "name": "Outlier & Remotetasks",
+                "year": 2017,
+                "currentStatus": "Operation",
+                "type": "App",
+                "hover": "name: Outlier & Remotetasks; year: 2017; type: App",
+                "image": "./assets/noun-ai-training-data-2985134.png",
+                "nounKey": "trainingdataset",
+                "color": "#515ADB"
+              }
+            },
+            "Neko": {
+              "metadata": {
+                "id": "Neko",
+                "name": "Neko Health",
+                "year": 2018,
+                "currentStatus": "Deployment",
+                "type": "Utility",
+                "hover": "name: Neko Health; year: 2018; type: Utility",
+                "image": "./assets/noun-health-insurance-7667596.png",
+                "nounKey": "healthcare",
+                "color": "#51B2DB"
+              }
+            },
+            "Instagram": {
+              "metadata": {
+                "id": "Instagram",
+                "name": "Instagram",
+                "year": 2010,
+                "currentStatus": "Operation",
+                "type": "Social",
+                "hover": "name: Instagram; year: 2010; type: Social",
+                "image": "./assets/noun-social-media-platform-7481620.png",
+                "nounKey": "platform",
+                "color": "#515ADB"
+              }
+            },
+            "TikTok": {
+              "metadata": {
+                "id": "TikTok",
+                "name": "TikTok",
+                "year": 2017,
+                "currentStatus": "Operation",
+                "type": "Social",
+                "hover": "name: TikTok; year: 2017; type: Social",
+                "image": "./assets/noun-social-media-platform-7481620.png",
+                "nounKey": "platform",
+                "color": "#515ADB"
+              }
+            },
+            "Dehomag": {
+              "metadata": {
+                "id": "Dehomag",
+                "name": "IBM Dehomag",
+                "year": 1933,
+                "currentStatus": "Retirement",
+                "type": "DataManagement",
+                "militaryUse": "Personnel, Logistics",
+                "civicUse": "HumanResources, Census",
+                "hover": "name: IBM Dehomag; year: 1933; type: DataManagement",
+                "image": "./assets/noun-punch-card-5134996.png",
+                "color": "#515ADB"
+              }
+            },
+            "Translator": {
+              "metadata": {
+                "id": "Translator",
+                "name": "IBM Simultaneous Translator",
+                "year": 1945,
+                "currentStatus": "Retirement",
+                "type": "Language",
+                "militaryUse": "Command",
+                "civicUse": "Translation",
+                "hover": "name: IBM Simultaneous Translator; year: 1945; type: Language",
+                "image": "./assets/noun-speech-recognition-1870316.png",
+                "color": "#515ADB"
+              }
+            },
+            "ELIZA": {
+              "metadata": {
+                "id": "ELIZA",
+                "name": "ELIZA",
+                "year": 1966,
+                "currentStatus": "Retirement",
+                "type": "Language",
+                "militaryUse": "Command",
+                "civicUse": "Communication",
+                "hover": "name: ELIZA; year: 1966; type: Language",
+                "image": "./assets/noun-chatbot-7107716.png",
+                "color": "#5186DB"
+              }
+            },
+            "Shoebox": {
+              "metadata": {
+                "id": "Shoebox",
+                "name": "Shoebox",
+                "year": 1964,
+                "currentStatus": "Retirement",
+                "type": "Language",
+                "militaryUse": "Command",
+                "civicUse": "Communication",
+                "hover": "name: Shoebox; year: 1964; type: Language",
+                "image": "./assets/noun-speech-recognition-1870316.png",
+                "color": "#515ADB"
+              }
+            },
+            "ARPANET": {
+              "metadata": {
+                "id": "ARPANET",
+                "name": "ARPANET",
+                "year": 1969,
+                "currentStatus": "Retirement",
+                "type": "Network",
+                "militaryUse": "Command",
+                "civicUse": "Internet",
+                "hover": "name: ARPANET; year: 1969; type: Network",
+                "image": "./assets/noun-networking-2909312.png",
+                "color": "#5186DB"
+              }
+            },
+            "Onavo": {
+              "metadata": {
+                "id": "Onavo",
+                "name": "Onavo",
+                "year": 2010,
+                "currentStatus": "Retirement",
+                "type": "Analytics, Potential spyware",
+                "militaryUse": "Intelligence",
+                "civicUse": "DataBrokers, Marketing, BehaviorEvaluation",
+                "MLTask": "Predict",
+                "hover": "name: Onavo; year: 2010; type: Analytics, Potential spyware",
+                "image": "./assets/noun-digital-footprint-6806678.png",
+                "color": "#515ADB"
+              }
+            },
+            "Wiz": {
+              "metadata": {
+                "id": "Wiz",
+                "name": "Wiz",
+                "year": 2020,
+                "currentStatus": "Aquired",
+                "type": "DataManagement",
+                "militaryUse": "Store",
+                "civicUse": "Logistics, Cybersecurity",
+                "MLTask": "CloudComputing, Cybersecurity",
+                "hover": "name: Wiz; year: 2020; type: DataManagement",
+                "image": "./assets/noun-locked-cloud-5565062.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Palestine": {
+              "metadata": {
+                "id": "Palestine",
+                "name": "Palestine",
+                "type": "Nation",
+                "airo:type": "AISubject",
+                "hover": "name: Palestine; stakeholder: Nation; role: AISubject",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Israel": {
+              "metadata": {
+                "id": "Israel",
+                "name": "Israel",
+                "type": "Nation",
                 "airo:type": "AIDeployer",
-                hover: "name: Azerbaijan; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN
+                "hover": "name: Israel; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51DBD9"
               }
             },
-            ARPANET: {
-              metadata: {
-                id: "ARPANET",
-                name: "ARPANET",
-                year: 1969,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: ARPANET; year: 1969; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-networking-2909312.png",
-                nounKey: NaN
-              }
-            },
-            MIT: {
-              metadata: {
-                id: "MIT",
-                name: "MIT",
-                type: "Institution",
-                "airo:type": "AIDeveloper",
-                hover: "name: MIT; stakeholder: Institution; role: AIDeveloper",
-                image: "./assets/noun-research-center-198322.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            Lattice: {
-              metadata: {
-                id: "Lattice",
-                name: "Lattice",
-                year: 2025,
-                currentStatus: "Deployment",
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Lattice; year: 2025; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-surveillance-monitor-6831349.png",
-                nounKey: NaN
-              }
-            },
-            Llama: {
-              metadata: {
-                id: "Llama",
-                name: "Llama",
-                year: 2023,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: Llama; year: 2023; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-text-generation-5611856.png",
-                nounKey: "model",
-                color: "#515ADB"
-              }
-            },
-            Lockheed: {
-              metadata: {
-                id: "Lockheed",
-                name: "Lockheed Martin",
-                type: "DefenseCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Lockheed Martin; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN,
-                color: "#515ADB"
-              }
-            },
-            Booz: {
-              metadata: {
-                id: "Booz",
-                name: "Booz Allen Hamilton",
-                type: "DefenseCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Booz Allen Hamilton; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN,
-                color: "#515ADB"
-              }
-            },
-            Foundry: {
-              metadata: {
-                id: "Foundry",
-                name: "Foundry",
-                year: 2022,
-                currentStatus: "Operation",
-                type: "DataManagment",
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: "SemanticSearch, Ontologies, DataAnalysis",
-                purpose: NaN,
-                capacity: NaN,
-                "vair:technique": NaN,
-                output: NaN,
-                "vair:riskSources": NaN,
-                impact: NaN,
-                hover: "name: Foundry; year: 2022; type: DataManagment; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-ai-training-data-2985134.png",
-                nounKey: NaN,
-                color: "#51B2DB"
-              }
-            },
-            ICE: {
-              metadata: {
-                id: "ICE",
-                name: "US Immigration (ICE)",
-                type: "Military",
+            "US": {
+              "metadata": {
+                "id": "US",
+                "name": "United States",
+                "type": "Nation",
                 "airo:type": "AIDeployer",
-                hover: "name: US Immigration (ICE); stakeholder: Military; role: AIDeployer",
-                image: "./assets/noun-riot-control-national-guards-1584300.png",
-                people: NaN,
-                details: NaN,
-                color: "#51B2DB"
+                "hover": "name: United States; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#5186DB"
               }
             },
-            NHS: {
-              metadata: {
-                id: "NHS",
-                name: "UK NHS",
-                type: "Institution",
-                "airo:type": "AIDeployer",
-                hover: "name: UK NHS; stakeholder: Institution; role: AIDeployer",
-                image: "./assets/noun-research-center-198322.png",
-                people: NaN,
-                details: NaN,
-                color: "#51B2DB"
+            "Iran": {
+              "metadata": {
+                "id": "Iran",
+                "name": "Iran",
+                "type": "Nation",
+                "airo:type": "AISubject",
+                "hover": "name: Iran; stakeholder: Nation; role: AISubject",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51B2DB"
               }
             },
-            DanishNP: {
-              metadata: {
-                id: "DanishNP",
-                name: "Danish Police",
-                type: "Military",
-                "airo:type": "AIDeployer",
-                hover: "name: Danish National Police; stakeholder: Military; role: AIDeployer",
-                image: "./assets/noun-riot-control-national-guards-1584300.png",
-                people: "Danish National Police",
-                details: NaN,
-                color: "#51B2DB"
+            "Venezuela": {
+              "metadata": {
+                "id": "Venezuela",
+                "name": "Venezuela",
+                "type": "Nation",
+                "airo:type": "AISubject",
+                "hover": "name: Venezuela; stakeholder: Nation; role: AISubject",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51B2DB"
               }
             },
-            Niantic: {
-              metadata: {
-                id: "Niantic",
-                name: "Niantic Spatial",
-                type: "TechCompany",
+            "Ukraine": {
+              "metadata": {
+                "id": "Ukraine",
+                "name": "Ukraine",
+                "type": "Nation",
+                "airo:type": "AIDeployer, AISubject",
+                "hover": "name: Ukraine; stakeholder: Nation; role: AIDeployer, AISubject",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Palantir": {
+              "metadata": {
+                "id": "Palantir",
+                "name": "Palantir",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Niantic Spatial; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
+                "hover": "name: Palantir; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51B2DB"
               }
             },
-            Unit8200: {
-              metadata: {
-                id: "Unit8200",
-                name: "Unit 8200",
-                type: "Military",
-                "airo:type": "AIDeveloper",
-                hover: "name: Unit 8200; stakeholder: Military; role: AIDeveloper",
-                image: "./assets/noun-military-7338796.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBD9"
-              }
-            },
-            Elbit: {
-              metadata: {
-                id: "Elbit",
-                name: "Elbit Systems",
-                type: "DefenseCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Elbit Systems; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBD9"
-              }
-            },
-            ClearviewAI: {
-              metadata: {
-                id: "ClearviewAI",
-                name: "Clearview AI",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Clearview AI; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#51B2DB"
-              }
-            },
-            Roboneers: {
-              metadata: {
-                id: "Roboneers",
-                name: "Roboneers",
-                type: "DefenseCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Roboneers; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-research-center-198322.png",
-                people: NaN,
-                details: NaN,
-                color: "#51B2DB"
-              }
-            },
-            Vyriy: {
-              metadata: {
-                id: "Vyriy",
-                name: "Vyriy",
-                type: "DefenseCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Vyriy; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-research-center-198322.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            PG: {
-              metadata: {
-                id: "PG",
-                name: "PG Robotics",
-                type: "DefenseCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: PG Robotics; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            UKDSTL: {
-              metadata: {
-                id: "UKDSTL",
-                name: "UKDSTL",
-                type: "Military",
-                "airo:type": "AIDeveloper",
-                hover: "name: UK Defence Science and Technology Laboratory; stakeholder: Military; role: AIDeveloper",
-                image: "./assets/noun-military-7338796.png",
-                people: "UK Defence Science and Technology Laboratory",
-                details: NaN,
-                color: "#51DBAB"
-              }
-            },
-            Google: {
-              metadata: {
-                id: "Google",
-                name: "Google",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper, AIProvider",
-                hover: "name: Google; stakeholder: TechCompany; role: AIDeveloper, AIProvider",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            AWS: {
-              metadata: {
-                id: "AWS",
-                name: "Amazon Web Services",
-                type: "TechCompany",
+            "AWS": {
+              "metadata": {
+                "id": "AWS",
+                "name": "Amazon Web Services",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper, AISupplier",
-                hover: "name: Amazon Web Services; stakeholder: TechCompany; role: AIDeveloper, AISupplier",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
+                "hover": "name: Amazon Web Services; stakeholder: TechCompany; role: AIDeveloper, AISupplier",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51B2DB"
               }
             },
-            DARPA: {
-              metadata: {
-                id: "DARPA",
-                name: "DARPA",
-                type: "Military",
-                "airo:type": "AIDeveloper",
-                hover: "name: DARPA; stakeholder: Military; role: AIDeveloper",
-                image: "./assets/noun-military-7338796.png",
-                people: NaN,
-                details: NaN,
-                color: "#5186DB"
+            "Russia": {
+              "metadata": {
+                "id": "Russia",
+                "name": "Russia",
+                "type": "Nation",
+                "airo:type": "AIDeployer, AISubject",
+                "hover": "name: Russia; stakeholder: Nation; role: AIDeployer, AISubject",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#5186DB"
               }
             },
-            Raphael: {
-              metadata: {
-                id: "Raphael",
-                name: "Raphael",
-                type: "DefenseCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Raphael; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBD9"
+            "Syria": {
+              "metadata": {
+                "id": "Syria",
+                "name": "Syria",
+                "type": "Nation",
+                "airo:type": "AISubject",
+                "hover": "name: Syria; stakeholder: Nation; role: AISubject",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#5186DB"
               }
             },
-            SpaceX: {
-              metadata: {
-                id: "SpaceX",
-                name: "SpaceX",
-                type: "DefenseCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: SpaceX; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: "Elon Musk",
-                details: NaN,
-                color: "#5186DB"
+            "Germany": {
+              "metadata": {
+                "id": "Germany",
+                "name": "Germany",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: Germany; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51DBAB"
               }
             },
-            TKH: {
-              metadata: {
-                id: "TKH",
-                name: "TKH Security",
-                type: "DefenseCompany",
+            "Rheinmetall": {
+              "metadata": {
+                "id": "Rheinmetall",
+                "name": "Rheinmetall",
+                "type": "DefenseCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: TKH Security; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
+                "hover": "name: Rheinmetall; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#51DBAB"
               }
             },
-            Rheinmetall: {
-              metadata: {
-                id: "Rheinmetall",
-                name: "Rheinmetall",
-                type: "DefenseCompany",
+            "Hikvision": {
+              "metadata": {
+                "id": "Hikvision",
+                "name": "Hikvision",
+                "type": "DefenseCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Rheinmetall; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBAB"
+                "hover": "name: Hikvision; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#51DBD9"
               }
             },
-            Arlington: {
-              metadata: {
-                id: "Arlington",
-                name: "Arlington Capital",
-                type: "Investor",
+            "TKH": {
+              "metadata": {
+                "id": "TKH",
+                "name": "TKH Security",
+                "type": "DefenseCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Arlington Capital; stakeholder: Investor; role: AIDeveloper",
-                image: "./assets/noun-museum-198296.png",
-                people: NaN,
-                details: NaN,
-                color: "#5186DB"
+                "hover": "name: TKH Security; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51DBD9"
               }
             },
-            KyonggiUniversity: {
-              metadata: {
-                id: "KyonggiUniversity",
-                name: "Kyonggi University",
-                type: "Institution",
+            "SpaceX": {
+              "metadata": {
+                "id": "SpaceX",
+                "name": "SpaceX",
+                "type": "DefenseCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Kyonggi University; stakeholder: Institution; role: AIDeveloper",
-                image: "./assets/noun-research-center-198322.png",
-                people: NaN,
-                details: NaN,
-                color: "#009ADB"
+                "hover": "name: SpaceX; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#5186DB"
               }
             },
-            NSO: {
-              metadata: {
-                id: "NSO",
-                name: "NSO Group",
-                type: "DefenseCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: NSO Group; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBD9"
+            "India": {
+              "metadata": {
+                "id": "India",
+                "name": "India",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: India; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51B2DB"
               }
             },
-            DoDAAM: {
-              metadata: {
-                id: "DoDAAM",
-                name: "DoDAAM",
-                type: "DefenseCompany",
+            "Rafael": {
+              "metadata": {
+                "id": "Rafael",
+                "name": "Rafael",
+                "type": "DefenseCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: DoDAAM; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN,
-                color: "#009ADB"
+                "hover": "name: Rafael; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Elbit": {
+              "metadata": {
+                "id": "Elbit",
+                "name": "Elbit Systems",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Elbit Systems; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Amazon": {
+              "metadata": {
+                "id": "Amazon",
+                "name": "Amazon",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper, AIProvider",
+                "hover": "name: Amazon; stakeholder: TechCompany; role: AIDeveloper, AIProvider",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Google": {
+              "metadata": {
+                "id": "Google",
+                "name": "Google",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper, AIProvider",
+                "hover": "name: Google; stakeholder: TechCompany; role: AIDeveloper, AIProvider",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Alphabet": {
+              "metadata": {
+                "id": "Alphabet",
+                "name": "Alphabet",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper, AIProvider",
+                "hover": "name: Alphabet; stakeholder: TechCompany; role: AIDeveloper, AIProvider",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Oracle": {
+              "metadata": {
+                "id": "Oracle",
+                "name": "Oracle",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper, AIProvider",
+                "hover": "name: Oracle; stakeholder: TechCompany; role: AIDeveloper, AIProvider",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#515ADB"
+              }
+            },
+            "IBM": {
+              "metadata": {
+                "id": "IBM",
+                "name": "IBM",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper, AIProvider",
+                "hover": "name: IBM; stakeholder: TechCompany; role: AIDeveloper, AIProvider",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#515ADB"
+              }
+            },
+            "Libya": {
+              "metadata": {
+                "id": "Libya",
+                "name": "Libya",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: Libya; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#5186DB"
+              }
+            },
+            "Azerbaijan": {
+              "metadata": {
+                "id": "Azerbaijan",
+                "name": "Azerbaijan",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: Azerbaijan; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#5186DB"
+              }
+            },
+            "Turkey": {
+              "metadata": {
+                "id": "Turkey",
+                "name": "Turkey",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: Turkey; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#5186DB"
+              }
+            },
+            "UK": {
+              "metadata": {
+                "id": "UK",
+                "name": "United Kingdom",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: United Kingdom; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Vyriy": {
+              "metadata": {
+                "id": "Vyriy",
+                "name": "Vyriy",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Vyriy; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Roboneers": {
+              "metadata": {
+                "id": "Roboneers",
+                "name": "Roboneers",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Roboneers; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#51B2DB"
+              }
+            },
+            "D3": {
+              "metadata": {
+                "id": "D3",
+                "name": "D3",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: D3; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Helsing": {
+              "metadata": {
+                "id": "Helsing",
+                "name": "Helsing",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Helsing; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#51B2DB"
+              }
+            },
+            "PG": {
+              "metadata": {
+                "id": "PG",
+                "name": "PG Robotics",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: PG Robotics; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Skyeton": {
+              "metadata": {
+                "id": "Skyeton",
+                "name": "Skyeton",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Skyeton; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Swarmer": {
+              "metadata": {
+                "id": "Swarmer",
+                "name": "Swarmer",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Swarmer; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#51B2DB"
+              }
+            },
+            "ClearviewAI": {
+              "metadata": {
+                "id": "ClearviewAI",
+                "name": "Clearview AI",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Clearview AI; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Presage": {
+              "metadata": {
+                "id": "Presage",
+                "name": "Presage",
+                "type": "Company",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Presage; stakeholder: Company; role: AIDeveloper",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#5186DB"
+              }
+            },
+            "Altec": {
+              "metadata": {
+                "id": "Altec",
+                "name": "Altec",
+                "type": "Company",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Altec; stakeholder: Company; role: AIDeveloper",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#5186DB"
+              }
+            },
+            "Niantic": {
+              "metadata": {
+                "id": "Niantic",
+                "name": "Niantic Spatial",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Niantic Spatial; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#5186DB"
+              }
+            },
+            "Arlington": {
+              "metadata": {
+                "id": "Arlington",
+                "name": "Arlington Capital",
+                "type": "Investor",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Arlington Capital; stakeholder: Investor; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#5186DB"
+              }
+            },
+            "Jordan": {
+              "metadata": {
+                "id": "Jordan",
+                "name": "Jordan",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: Jordan; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51DBD9"
+              }
+            },
+            "SouthKorea": {
+              "metadata": {
+                "id": "SouthKorea",
+                "name": "South Korea",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: South Korea; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#009ADB"
+              }
+            },
+            "China": {
+              "metadata": {
+                "id": "China",
+                "name": "China",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: China; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#009ADB"
+              }
+            },
+            "NSO": {
+              "metadata": {
+                "id": "NSO",
+                "name": "NSO Group",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: NSO Group; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Unit8200": {
+              "metadata": {
+                "id": "Unit8200",
+                "name": "Unit 8200",
+                "type": "Military",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Unit 8200; stakeholder: Military; role: AIDeveloper",
+                "image": "./assets/noun-locked-location-198286.png",
+                "color": "#51DBD9"
+              }
+            },
+            "DARPA": {
+              "metadata": {
+                "id": "DARPA",
+                "name": "DARPA",
+                "type": "Military",
+                "airo:type": "AIDeveloper",
+                "hover": "name: DARPA; stakeholder: Military; role: AIDeveloper",
+                "image": "./assets/noun-locked-location-198286.png",
+                "color": "#5186DB"
+              }
+            },
+            "Microsoft": {
+              "metadata": {
+                "id": "Microsoft",
+                "name": "Microsoft",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Microsoft; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#5186DB"
+              }
+            },
+            "SRI": {
+              "metadata": {
+                "id": "SRI",
+                "name": "SRI: Stanford Research Institute",
+                "type": "Institution",
+                "airo:type": "AIDeveloper",
+                "hover": "name: SRI: Stanford Research Institute; stakeholder: Institution; role: AIDeveloper",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#5186DB"
+              }
+            },
+            "KyonggiUniversity": {
+              "metadata": {
+                "id": "KyonggiUniversity",
+                "name": "Kyonggi University",
+                "type": "Institution",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Kyonggi University; stakeholder: Institution; role: AIDeveloper",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#009ADB"
               }
             },
             "HanwhaTechwin-Samsung": {
-              metadata: {
-                id: "HanwhaTechwin-Samsung",
-                name: "Hanwha Techwin (formerly Samsung)",
-                type: "DefenseCompany",
+              "metadata": {
+                "id": "HanwhaTechwin-Samsung",
+                "name": "Hanwha Techwin (formerly Samsung)",
+                "type": "DefenseCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Hanwha Techwin (formerly Samsung); stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN,
-                color: "#009ADB"
+                "hover": "name: Hanwha Techwin (formerly Samsung); stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#009ADB"
               }
             },
-            SRI: {
-              metadata: {
-                id: "SRI",
-                name: "SRI: Stanford Research Institute",
-                type: "Institution",
+            "DoDAAM": {
+              "metadata": {
+                "id": "DoDAAM",
+                "name": "DoDAAM",
+                "type": "DefenseCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: SRI: Stanford Research Institute; stakeholder: Institution; role: AIDeveloper",
-                image: "./assets/noun-research-center-198322.png",
-                people: NaN,
-                details: NaN,
-                color: "#5186DB"
+                "hover": "name: DoDAAM; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#009ADB"
               }
             },
-            SwissInstitute: {
-              metadata: {
-                id: "SwissInstitute",
-                name: "Swiss Institute",
-                type: "Institution",
+            "SwissInstitute": {
+              "metadata": {
+                "id": "SwissInstitute",
+                "name": "Swiss Institute",
+                "type": "Institution",
                 "airo:type": "AIDeveloper",
-                hover: "name: Swiss Institute; stakeholder: Institution; role: AIDeveloper",
-                image: "./assets/noun-research-center-198322.png",
-                people: NaN,
-                details: NaN,
-                color: "#5186DB"
+                "hover": "name: Swiss Institute; stakeholder: Institution; role: AIDeveloper",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#5186DB"
               }
             },
-            Hikvision: {
-              metadata: {
-                id: "Hikvision",
-                name: "Hikvision",
-                type: "DefenseCompany",
+            "UNHCR": {
+              "metadata": {
+                "id": "UNHCR",
+                "name": "UNHCR",
+                "type": "Military",
                 "airo:type": "AIDeveloper",
-                hover: "name: Hikvision; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN
+                "hover": "name: UNHCR; stakeholder: Military; role: AIDeveloper; notes:The Office of the United Nations High Commissioner for Refugees is a United Nations agency mandated to aid and protect refugees, forcibly displaced communities, and stateless people, and to assist in their voluntary repatriation, local integration or resettlement to a third country. (Wikipedia)",
+                "image": "./assets/noun-museum-198296.png",
+                "people": "The Office of the United Nations High Commissioner for Refugees is a United Nations agency mandated to aid and protect refugees, forcibly displaced communities, and stateless people, and to assist in their voluntary repatriation, local integration or resettlement to a third country. (Wikipedia)",
+                "color": "#51DBD9"
               }
             },
-            Turkey: {
-              metadata: {
-                id: "Turkey",
-                name: "Turkey",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: Turkey; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            Skyeton: {
-              metadata: {
-                id: "Skyeton",
-                name: "Skyeton",
-                type: "DefenseCompany",
+            "UKDSTL": {
+              "metadata": {
+                "id": "UKDSTL",
+                "name": "UKDSTL",
+                "type": "Military",
                 "airo:type": "AIDeveloper",
-                hover: "name: Skyeton; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN
+                "hover": "name: UK Defence Science and Technology Laboratory; stakeholder: Military; role: AIDeveloper",
+                "image": "./assets/noun-locked-location-198286.png",
+                "people": "UK Defence Science and Technology Laboratory",
+                "color": "#51DBAB"
               }
             },
-            Swarmer: {
-              metadata: {
-                id: "Swarmer",
-                name: "Swarmer",
-                type: "DefenseCompany",
+            "QinetiQ": {
+              "metadata": {
+                "id": "QinetiQ",
+                "name": "QinetiQ",
+                "type": "DefenseCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Swarmer; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN
+                "hover": "name: QinetiQ; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#51DBAB"
               }
             },
-            D3: {
-              metadata: {
-                id: "D3",
-                name: "D3",
-                type: "DefenseCompany",
+            "UKDES": {
+              "metadata": {
+                "id": "UKDES",
+                "name": "UKDE&S",
+                "type": "Military",
                 "airo:type": "AIDeveloper",
-                hover: "name: D3; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-research-center-198322.png",
-                people: NaN,
-                details: NaN,
-                color: "#51B2DB"
+                "hover": "name: UK Defense Equipment and Support; stakeholder: Military; role: AIDeveloper",
+                "image": "./assets/noun-locked-location-198286.png",
+                "people": "UK Defense Equipment and Support",
+                "color": "#51DBAB"
               }
             },
-            Presage: {
-              metadata: {
-                id: "Presage",
-                name: "Presage",
-                type: "Company",
+            "Endeavor": {
+              "metadata": {
+                "id": "Endeavor",
+                "name": "Endeavor",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Presage; stakeholder: Company; role: AIDeveloper",
-                image: "./assets/noun-research-center-198322.png",
-                people: NaN,
-                details: NaN,
-                color: "#5186DB"
+                "hover": "name: Endeavor; stakeholder: TechCompany; role: AIDevelopernotes: formerly iRobot, sold to FLIR Systems (Teledyne) 2019",
+                "image": "./assets/noun-software-industry-198331.png",
+                "people": "formerly iRobot, sold to FLIR Systems (Teledyne) 2019",
+                "color": "#5186DB"
               }
             },
-            Altec: {
-              metadata: {
-                id: "Altec",
-                name: "Altec",
-                type: "Company",
+            "Blackrock": {
+              "metadata": {
+                "id": "Blackrock",
+                "name": "BlackRock",
+                "type": "Investor",
                 "airo:type": "AIDeveloper",
-                hover: "name: Altec; stakeholder: Company; role: AIDeveloper",
-                image: "./assets/noun-research-center-198322.png",
-                people: NaN,
-                details: NaN,
-                color: "#5186DB"
+                "hover": "name: BlackRock; stakeholder: Investor; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#51DBD9"
               }
             },
-            Oracle: {
-              metadata: {
-                id: "Oracle",
-                name: "Oracle",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper, AIProvider",
-                hover: "name: Oracle; stakeholder: TechCompany; role: AIDeveloper, AIProvider",
-                image: "./assets/noun-software-industry-198331.png",
-                people: "Larry Ellison",
-                details: NaN,
-                color: "#515ADB"
-              }
-            },
-            IBM: {
-              metadata: {
-                id: "IBM",
-                name: "IBM",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper, AIProvider",
-                hover: "name: IBM; stakeholder: TechCompany; role: AIDeveloper, AIProvider",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#515ADB"
-              }
-            },
-            GoogleCloud: {
-              metadata: {
-                id: "GoogleCloud",
-                name: "Google Cloud",
-                type: "TechCompany",
+            "Stanford": {
+              "metadata": {
+                "id": "Stanford",
+                "name": "Stanford University",
+                "type": "Institution",
                 "airo:type": "AIDeveloper",
-                hover: "name: Google Cloud; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
+                "hover": "name: Stanford University; stakeholder: Institution; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#5186DB"
               }
             },
-            Microsoft: {
-              metadata: {
-                id: "Microsoft",
-                name: "Microsoft",
-                type: "TechCompany",
+            "Anthropic": {
+              "metadata": {
+                "id": "Anthropic",
+                "name": "Anthropic",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Microsoft; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
+                "hover": "name: Anthropic; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51B2DB"
               }
             },
-            Helsing: {
-              metadata: {
-                id: "Helsing",
-                name: "Helsing",
-                type: "DefenseCompany",
+            "iRobot": {
+              "metadata": {
+                "id": "iRobot",
+                "name": "iRobot",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Helsing; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-museum-198296.png",
-                people: NaN,
-                details: NaN,
-                color: "#51B2DB"
+                "hover": "name: iRobot; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#5186DB"
               }
             },
-            QinetiQ: {
-              metadata: {
-                id: "QinetiQ",
-                name: "QinetiQ",
-                type: "DefenseCompany",
+            "Meta": {
+              "metadata": {
+                "id": "Meta",
+                "name": "Meta",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: QinetiQ; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBAB"
+                "hover": "name: Meta; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#515ADB"
               }
             },
-            Endeavor: {
-              metadata: {
-                id: "Endeavor",
-                name: "Endeavor",
-                type: "TechCompany",
+            "OpenAI": {
+              "metadata": {
+                "id": "OpenAI",
+                "name": "OpenAI",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Endeavor; stakeholder: TechCompany; role: AIDevelopernotes: formerly iRobot, sold to FLIR Systems (Teledyne) 2019",
-                image: "./assets/noun-software-industry-198331.png",
-                people: "formerly iRobot, sold to FLIR Systems (Teledyne) 2019",
-                details: NaN,
-                color: "#5186DB"
+                "hover": "name: OpenAI; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#5186DB"
               }
             },
-            BlackRock: {
-              metadata: {
-                id: "BlackRock",
-                name: "BlackRock",
-                type: "Investor",
-                "airo:type": "AIDeveloper",
-                hover: "name: BlackRock; stakeholder: Investor; role: AIDeveloper",
-                image: "./assets/noun-museum-198296.png",
-                people: "Larry Fink",
-                details: NaN
-              }
-            },
-            Roomba: {
-              metadata: {
-                id: "Roomba",
-                name: "Roomba",
-                year: 2002,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: Roomba; year: 2002; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-robot-vacuum-6793770.png",
-                nounKey: "robotVacuum",
-                color: "#5186DB"
-              }
-            },
-            iRobot: {
-              metadata: {
-                id: "iRobot",
-                name: "iRobot",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: iRobot; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#5186DB"
-              }
-            },
-            Claude: {
-              metadata: {
-                id: "Claude",
-                name: "Claude",
-                year: 2023,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: Claude; year: 2023; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-chatbot-7107716.png",
-                nounKey: "chatbot"
-              }
-            },
-            Anthropic: {
-              metadata: {
-                id: "Anthropic",
-                name: "Anthropic",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Anthropic; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            Meta: {
-              metadata: {
-                id: "Meta",
-                name: "Meta",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Meta; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#515ADB"
-              }
-            },
-            Facebook: {
-              metadata: {
-                id: "Facebook",
-                name: "Facebook",
-                year: 2004,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: Facebook; year: 2004; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-social-media-platform-7481620.png",
-                nounKey: "platform",
-                color: "#515ADB"
-              }
-            },
-            WhatsApp: {
-              metadata: {
-                id: "WhatsApp",
-                name: "WhatsApp",
-                year: 2009,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: WhatsApp; year: 2009; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-social-media-platform-7481620.png",
-                nounKey: "platform",
-                color: "#515ADB"
-              }
-            },
-            Anduril: {
-              metadata: {
-                id: "Anduril",
-                name: "Anduril",
-                type: "DefenseCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Anduril; stakeholder: DefenseCompany; role: AIDeveloper",
-                image: "./assets/noun-radiation-205518.png",
-                people: "Palmer Lucky",
-                details: NaN
-              }
-            },
-            OpenAI: {
-              metadata: {
-                id: "OpenAI",
-                name: "OpenAI",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: OpenAI; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            ChatGPT: {
-              metadata: {
-                id: "ChatGPT",
-                name: "ChatGPT",
-                year: 2022,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: ChatGPT; year: 2022; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-chatbot-7107716.png",
-                nounKey: "chatbot"
-              }
-            },
-            Gemini: {
-              metadata: {
-                id: "Gemini",
-                name: "Gemini/Bard",
-                year: 2024,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: Gemini/Bard; year: 2024; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-chatbot-7107716.png",
-                nounKey: "chatbot"
-              }
-            },
-            DoorDash: {
-              metadata: {
-                id: "DoorDash",
-                name: "DoorDash",
-                year: 2012,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: DoorDash; year: 2012; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-social-media-platform-7481620.png",
-                nounKey: "logistics",
-                color: "#51DBAB"
-              }
-            },
-            KKR: {
-              metadata: {
-                id: "KKR",
-                name: "KKR Investments",
-                type: "Investor",
-                "airo:type": "AIDeveloper",
-                hover: "name: KKR Investments; stakeholder: Investor; role: AIDeveloper",
-                image: "./assets/noun-museum-198296.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBAB"
-              }
-            },
-            Hololens: {
-              metadata: {
-                id: "Hololens",
-                name: "Hololens 2",
-                year: 2016,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: Hololens 2; year: 2016; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-virtual-headset-7137401.png",
-                nounKey: "AR"
-              }
-            },
-            Scopley: {
-              metadata: {
-                id: "Scopley",
-                name: "Scopley Games",
-                type: "TechCompany",
-                "airo:type": "AIDeployer",
-                hover: "name: Scopley (Savvy Games); stakeholder: TechCompany; role: AIDeployer",
-                image: "./assets/noun-software-industry-198331.png",
-                people: "Scopley (Savvy Games)",
-                details: NaN
-              }
-            },
-            Saudi: {
-              metadata: {
-                id: "Saudi",
-                name: "Saudi Arabia",
-                type: "Nation",
-                "airo:type": "AIDeployer, AIDeveloper",
-                hover: "name: Saudi Arabia; stakeholder: Nation; role: AIDeployer, AIDeveloper",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            Pokemon: {
-              metadata: {
-                id: "Pokemon",
-                name: "Pokémon Go",
-                year: 2016,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: Pokémon Go; year: 2016; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-photogrammetry-4284363.png",
-                nounKey: "game"
-              }
-            },
-            Dehomag: {
-              metadata: {
-                id: "Dehomag",
-                name: "IBM Dehomag",
-                year: 1933,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: IBM Dehomag; year: 1933; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-punch-card-5134996.png",
-                nounKey: NaN,
-                color: "#515ADB"
-              }
-            },
-            Translator: {
-              metadata: {
-                id: "Translator",
-                name: "IBM Simultaneous Translator",
-                year: 1945,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: IBM Simultaneous Translator; year: 1945; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-speech-recognition-1870316.png",
-                nounKey: NaN,
-                color: "#515ADB"
-              }
-            },
-            Shoebox: {
-              metadata: {
-                id: "Shoebox",
-                name: "Shoebox",
-                year: 1964,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: Shoebox; year: 1964; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-speech-recognition-1870316.png",
-                nounKey: NaN,
-                color: "#515ADB"
-              }
-            },
-            Palestine: {
-              metadata: {
-                id: "Palestine",
-                name: "Palestine",
-                type: "Nation",
+            "Lebanon": {
+              "metadata": {
+                "id": "Lebanon",
+                "name": "Lebanon",
+                "type": "Nation",
                 "airo:type": "AISubject",
-                hover: "name: Palestine; stakeholder: Nation; role: AISubject",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBD9"
+                "hover": "name: Lebanon; stakeholder: Nation; role: AISubject",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51DBD9"
               }
             },
-            Lebanon: {
-              metadata: {
-                id: "Lebanon",
-                name: "Lebanon",
-                type: "Nation",
-                "airo:type": "AISubject",
-                hover: "name: Lebanon; stakeholder: Nation; role: AISubject",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBD9"
-              }
-            },
-            GTR: {
-              metadata: {
-                id: "GTR",
-                name: "Global Technical Reality Data Centers",
-                type: "TechCompany",
-                "airo:type": "AIOperator",
-                hover: "name: Global Technical Reality; stakeholder: TechCompany; role: AIOperator",
-                image: "./assets/noun-software-industry-198331.png",
-                people: "Global Technical Reality",
-                details: NaN,
-                color: "#51DBAB"
-              }
-            },
-            Spain: {
-              metadata: {
-                id: "Spain",
-                name: "Spain",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: Spain; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBAB"
-              }
-            },
-            Vantage: {
-              metadata: {
-                id: "Vantage",
-                name: "Vantage Towers",
-                type: "Utility",
-                "airo:type": "Stakeholder",
-                hover: "name: Vantage Towers; stakeholder: Utility; role: Stakeholder",
-                image: "./assets/noun-infrastructure-6195519.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBAB"
-              }
-            },
-            Hyperoptic: {
-              metadata: {
-                id: "Hyperoptic",
-                name: "Hyperoptic",
-                type: "Utility",
-                "airo:type": "Stakeholder",
-                hover: "name: Hyperoptic; stakeholder: Utility; role: Stakeholder",
-                image: "./assets/noun-infrastructure-6195519.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBAB"
-              }
-            },
-            "Landeskriminalamt-NRW": {
-              metadata: {
-                id: "Landeskriminalamt-NRW",
-                name: "German State Police-NRW",
-                type: "Military",
-                "airo:type": "AIDeployer",
-                hover: "name: German State Police North Rhine Westphalia; stakeholder: Military; role: AIDeployer",
-                image: "./assets/noun-riot-control-national-guards-1584300.png",
-                people: "German State Police NRW",
-                details: NaN,
-                color: "#51DBAB"
-              }
-            },
-            Denmark: {
-              metadata: {
-                id: "Denmark",
-                name: "Denmark",
-                type: "Nation",
-                "airo:type": "AIDeployer",
-                hover: "name: Denmark; stakeholder: Nation; role: AIDeployer",
-                image: "./assets/noun-flagged-location-198290.png",
-                people: NaN,
-                details: NaN,
-                color: "#51B2DB"
-              }
-            },
-            UKDES: {
-              metadata: {
-                id: "UKDES",
-                name: "UKDE&S",
-                type: "Military",
+            "GoogleCloud": {
+              "metadata": {
+                "id": "GoogleCloud",
+                "name": "Google Cloud",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: UK Defense Equipment and Support; stakeholder: Military; role: AIDeveloper",
-                image: "./assets/noun-military-7338796.png",
-                people: "UK Defense Equipment and Support",
-                details: NaN,
-                color: "#51DBAB"
+                "hover": "name: Google Cloud; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#5186DB"
               }
             },
-            Stanford: {
-              metadata: {
-                id: "Stanford",
-                name: "Stanford University",
-                type: "Institution",
+            "Azure": {
+              "metadata": {
+                "id": "Azure",
+                "name": "Azure",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Stanford University; stakeholder: Institution; role: AIDeveloper",
-                image: "./assets/noun-museum-198296.png",
-                people: NaN,
-                details: NaN
+                "hover": "name: Azure; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#5186DB"
               }
             },
-            Amazon: {
-              metadata: {
-                id: "Amazon",
-                name: "Amazon",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper, AIProvider",
-                hover: "name: Amazon; stakeholder: TechCompany; role: AIDeveloper, AIProvider",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            Alphabet: {
-              metadata: {
-                id: "Alphabet",
-                name: "Alphabet",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper, AIProvider",
-                hover: "name: Alphabet; stakeholder: TechCompany; role: AIDeveloper, AIProvider",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            Azure: {
-              metadata: {
-                id: "Azure",
-                name: "Azure",
-                type: "TechCompany",
-                "airo:type": "AIDeveloper",
-                hover: "name: Azure; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN
-              }
-            },
-            Mamram: {
-              metadata: {
-                id: "Mamram",
-                name: "Mamram",
-                type: "Military",
+            "Mamram": {
+              "metadata": {
+                "id": "Mamram",
+                "name": "Mamram",
+                "type": "Military",
                 "airo:type": "AIDeployer",
-                hover: "name: Mamram; stakeholder: Military; role: AIDeployer",
-                image: "./assets/noun-military-7338796.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBD9"
+                "hover": "name: Mamram; stakeholder: Military; role: AIDeployer",
+                "image": "./assets/noun-locked-location-198286.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Anduril": {
+              "metadata": {
+                "id": "Anduril",
+                "name": "Anduril",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Anduril; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#5186DB"
+              }
+            },
+            "Lockheed": {
+              "metadata": {
+                "id": "Lockheed",
+                "name": "Lockheed Martin",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Lockheed Martin; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#515ADB"
+              }
+            },
+            "Booz": {
+              "metadata": {
+                "id": "Booz",
+                "name": "Booz Allen Hamilton",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Booz Allen Hamilton; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#515ADB"
               }
             },
             "PLA-PRC": {
-              metadata: {
-                id: "PLA-PRC",
-                name: "People's Liberation Army",
-                type: "Military",
+              "metadata": {
+                "id": "PLA-PRC",
+                "name": "People's Liberation Army",
+                "type": "Military",
                 "airo:type": "AIDeployer, AIDeveloper",
-                hover: "name: People's Liberation Army, China; stakeholder: Military; role: AIDeployer, AIDeveloper",
-                image: "./assets/noun-military-7338796.png",
-                people: "People's Liberation Army China",
-                details: NaN,
-                color: "#009ADB"
+                "hover": "name: People's Liberation Army, China; stakeholder: Military; role: AIDeployer, AIDeveloper",
+                "image": "./assets/noun-locked-location-198286.png",
+                "people": "People's Liberation Army China",
+                "color": "#009ADB"
               }
             },
-            Accenture: {
-              metadata: {
-                id: "Accenture",
-                name: "Accenture",
-                type: "TechCompany",
+            "Deloitte": {
+              "metadata": {
+                "id": "Deloitte",
+                "name": "Deloitte",
+                "type": "Investor",
                 "airo:type": "AIDeveloper",
-                hover: "name: Accenture; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#515ADB"
+                "hover": "name: Deloitte; stakeholder: Investor; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#515ADB"
               }
             },
-            Deloitte: {
-              metadata: {
-                id: "Deloitte",
-                name: "Deloitte",
-                type: "Investor",
+            "Accenture": {
+              "metadata": {
+                "id": "Accenture",
+                "name": "Accenture",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Deloitte; stakeholder: Investor; role: AIDeveloper",
-                image: "./assets/noun-museum-198296.png",
-                people: NaN,
-                details: NaN,
-                color: "#515ADB"
+                "hover": "name: Accenture; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#515ADB"
               }
             },
-            Databricks: {
-              metadata: {
-                id: "Databricks",
-                name: "Databricks",
-                type: "TechCompany",
+            "Databricks": {
+              "metadata": {
+                "id": "Databricks",
+                "name": "Databricks",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Databricks; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#515ADB"
+                "hover": "name: Databricks; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#515ADB"
               }
             },
-            Leidos: {
-              metadata: {
-                id: "Leidos",
-                name: "Leidos",
-                type: "TechCompany",
+            "Leidos": {
+              "metadata": {
+                "id": "Leidos",
+                "name": "Leidos",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Leidos; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#515ADB"
+                "hover": "name: Leidos; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#515ADB"
               }
             },
-            ScaleAI: {
-              metadata: {
-                id: "ScaleAI",
-                name: "ScaleAI",
-                type: "TechCompany",
+            "ScaleAI": {
+              "metadata": {
+                "id": "ScaleAI",
+                "name": "ScaleAI",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: ScaleAI; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#515ADB"
+                "hover": "name: ScaleAI; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#515ADB"
               }
             },
-            Snowflake: {
-              metadata: {
-                id: "Snowflake",
-                name: "Snowflake",
-                type: "TechCompany",
+            "Snowflake": {
+              "metadata": {
+                "id": "Snowflake",
+                "name": "Snowflake",
+                "type": "TechCompany",
                 "airo:type": "AIDeveloper",
-                hover: "name: Snowflake; stakeholder: TechCompany; role: AIDeveloper",
-                image: "./assets/noun-software-industry-198331.png",
-                people: NaN,
-                details: NaN,
-                color: "#515ADB"
+                "hover": "name: Snowflake; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#515ADB"
               }
             },
-            Vertex: {
-              metadata: {
-                id: "Vertex",
-                name: "Vertex",
-                year: 2019,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: Vertex; year: 2019; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-locked-cloud-5565062.png",
-                nounKey: "cloud"
+            "KKR": {
+              "metadata": {
+                "id": "KKR",
+                "name": "KKR Investments",
+                "type": "Investor",
+                "airo:type": "AIDeveloper",
+                "hover": "name: KKR Investments; stakeholder: Investor; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#51DBAB"
               }
             },
-            Oculus: {
-              metadata: {
-                id: "Oculus",
-                name: "Oculus Rift",
-                year: 2012,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: Oculus Rift; year: 2012; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-virtual-headset-7137401.png",
-                nounKey: "VR"
+            "GTR": {
+              "metadata": {
+                "id": "GTR",
+                "name": "Global Technical Reality Data Centers",
+                "type": "TechCompany",
+                "airo:type": "AIOperator",
+                "hover": "name: Global Technical Reality; stakeholder: TechCompany; role: AIOperator",
+                "image": "./assets/noun-software-industry-198331.png",
+                "people": "Global Technical Reality",
+                "color": "#51DBAB"
               }
             },
-            ELIZA: {
-              metadata: {
-                id: "ELIZA",
-                name: "ELIZA",
-                year: 1966,
-                currentStatus: NaN,
-                type: NaN,
-                militaryUse: NaN,
-                civicUse: NaN,
-                MLTask: NaN,
-                purpose: NaN,
-                capacity: NaN,
-                output: NaN,
-                impact: NaN,
-                hover: "name: ELIZA; year: 1966; type: ; Military use: ; Civic use: ; Purpose: ; Capabilities: ; Outputs: ; Impacts: ",
-                image: "./assets/noun-chatbot-7107716.png",
-                nounKey: NaN
+            "Hyperoptic": {
+              "metadata": {
+                "id": "Hyperoptic",
+                "name": "Hyperoptic",
+                "type": "Utility",
+                "airo:type": "Stakeholder",
+                "hover": "name: Hyperoptic; stakeholder: Utility; role: Stakeholder",
+                "image": "./assets/noun-infrastructure-6195519.png",
+                "color": "#51DBAB"
               }
             },
-            DIANA: {
-              metadata: {
-                id: "DIANA",
-                name: "Defence Innovation Accelerator for the North Atlantic (DIANA)",
-                type: "Military",
-                "airo:type": "AIDeployer, AIDeveloper",
-                hover: "name: Defence Innovation Accelerator for the North Atlantic (DIANA); stakeholder: Military; role: AIDeployer, AIDeveloper",
-                image: "./assets/noun-military-7338796.png",
-                people: NaN,
-                details: NaN,
-                color: "#51DBAB"
+            "Vantage": {
+              "metadata": {
+                "id": "Vantage",
+                "name": "Vantage Towers",
+                "type": "Utility",
+                "airo:type": "Stakeholder",
+                "hover": "name: Vantage Towers; stakeholder: Utility; role: Stakeholder",
+                "image": "./assets/noun-infrastructure-6195519.png",
+                "color": "#51DBAB"
               }
             },
-            NATO: {
-              metadata: {
-                id: "NATO",
-                name: "NATO",
-                type: "Military",
+            "Landeskriminalamt": {
+              "metadata": {
+                "id": "Landeskriminalamt",
+                "name": "German State Police-NRW, Hesse, Bavaria",
+                "type": "Police",
                 "airo:type": "AIDeployer",
-                hover: "name: NATO; stakeholder: Military; role: AIDeployer",
-                image: "./assets/noun-military-7338796.png",
-                people: "North Atlantic Treaty Organization",
-                details: NaN,
-                color: "#51DBAB"
+                "hover": "name: German State Police North Rhine Westphalia; stakeholder: Police; role: AIDeployer",
+                "image": "./assets/noun-riot-control-national-guards-1584300.png",
+                "people": "German State Police NRW",
+                "color": "#51B2DB"
+              }
+            },
+            "DanishNP": {
+              "metadata": {
+                "id": "DanishNP",
+                "name": "Danish Police",
+                "type": "Police",
+                "airo:type": "AIDeployer",
+                "hover": "name: Danish National Police; stakeholder: Police; role: AIDeployer",
+                "image": "./assets/noun-riot-control-national-guards-1584300.png",
+                "people": "Danish National Police",
+                "color": "#51B2DB"
+              }
+            },
+            "Denmark": {
+              "metadata": {
+                "id": "Denmark",
+                "name": "Denmark",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: Denmark; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Scopley": {
+              "metadata": {
+                "id": "Scopley",
+                "name": "Scopley Games",
+                "type": "TechCompany",
+                "airo:type": "AIDeployer",
+                "hover": "name: Scopley (Savvy Games); stakeholder: TechCompany; role: AIDeployer",
+                "image": "./assets/noun-software-industry-198331.png",
+                "people": "Scopley (Savvy Games)",
+                "color": "#5186DB"
+              }
+            },
+            "Saudi": {
+              "metadata": {
+                "id": "Saudi",
+                "name": "Saudi Arabia",
+                "type": "Nation",
+                "airo:type": "AIDeployer, AIDeveloper",
+                "hover": "name: Saudi Arabia; stakeholder: Nation; role: AIDeployer, AIDeveloper",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#5186DB"
+              }
+            },
+            "MIT": {
+              "metadata": {
+                "id": "MIT",
+                "name": "MIT",
+                "type": "Institution",
+                "airo:type": "AIDeveloper",
+                "hover": "name: MIT; stakeholder: Institution; role: AIDeveloper",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#5186DB"
+              }
+            },
+            "Spain": {
+              "metadata": {
+                "id": "Spain",
+                "name": "Spain",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: Spain; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51DBAB"
+              }
+            },
+            "NHS": {
+              "metadata": {
+                "id": "NHS",
+                "name": "UK NHS",
+                "type": "Institution",
+                "airo:type": "AIDeployer",
+                "hover": "name: UK NHS; stakeholder: Institution; role: AIDeployer",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#51B2DB"
+              }
+            },
+            "ICE": {
+              "metadata": {
+                "id": "ICE",
+                "name": "US Immigration (ICE)",
+                "type": "Police",
+                "airo:type": "AIDeployer",
+                "hover": "name: US Immigration (ICE); stakeholder: Police; role: AIDeployer",
+                "image": "./assets/noun-riot-control-national-guards-1584300.png",
+                "color": "#51B2DB"
+              }
+            },
+            "DIANA": {
+              "metadata": {
+                "id": "DIANA",
+                "name": "DIANA",
+                "type": "Military",
+                "airo:type": "AIDeployer, AIDeveloper",
+                "hover": "name: Defence Innovation Accelerator for the North Atlantic (DIANA); stakeholder: Military; role: AIDeployer, AIDeveloper",
+                "image": "./assets/noun-locked-location-198286.png",
+                "color": "#51DBAB"
+              }
+            },
+            "NATO": {
+              "metadata": {
+                "id": "NATO",
+                "name": "NATO",
+                "type": "Military",
+                "airo:type": "AIDeployer",
+                "hover": "name: NATO; stakeholder: Military; role: AIDeployer",
+                "image": "./assets/noun-locked-location-198286.png",
+                "people": "North Atlantic Treaty Organization",
+                "color": "#51DBAB"
+              }
+            },
+            "Apple": {
+              "metadata": {
+                "id": "Apple",
+                "name": "Apple",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Apple; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#5186DB"
+              }
+            },
+            "GDIT": {
+              "metadata": {
+                "id": "GDIT",
+                "name": "General Dynamics Information Technologies",
+                "type": "TechCompany",
+                "airo:type": "AIDeployer, AIDeveloper",
+                "hover": "name: General Dynamics Information Technologies; stakeholder: TechCompany; role: AIDeployer, AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#5186DB"
+              }
+            },
+            "Corsight": {
+              "metadata": {
+                "id": "Corsight",
+                "name": "Corsight.AI",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Corsight.AI; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Vanguard": {
+              "metadata": {
+                "id": "Vanguard",
+                "name": "Vanguard",
+                "type": "Investor",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Vanguard; stakeholder: Investor; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#51B2DB"
+              }
+            },
+            "CBP": {
+              "metadata": {
+                "id": "CBP",
+                "name": "US Customs and Border Patrol",
+                "type": "Police",
+                "airo:type": "AIDeployer",
+                "hover": "name: US Customs and Border Patrol; stakeholder: Police; role: AIDeployer",
+                "image": "./assets/noun-riot-control-national-guards-1584300.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Horizon": {
+              "metadata": {
+                "id": "Horizon",
+                "name": "Horizon Europe",
+                "type": "Institution",
+                "airo:type": "Stakeholder",
+                "hover": "name: Horizon Europe; stakeholder: Institution; role: Stakeholder",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#515ADB"
+              }
+            },
+            "QS": {
+              "metadata": {
+                "id": "QS",
+                "name": "Quantum Systems",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Quantum Systems; stakeholder: DefenseCompany; role: AIDeveloper",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#51DBAB"
+              }
+            },
+            "DIU": {
+              "metadata": {
+                "id": "DIU",
+                "name": "US Defense Innovation Unit",
+                "type": "Military",
+                "airo:type": "AIDeployer, AIOperator",
+                "hover": "name: US Defense Innovation Unit; stakeholder: Military; role: AIDeployer, AIOperator",
+                "image": "./assets/noun-locked-location-198286.png",
+                "color": "#5186DB"
+              }
+            },
+            "Axon": {
+              "metadata": {
+                "id": "Axon",
+                "name": "Axon",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeployer, AIDeveloper",
+                "hover": "name: Axon; stakeholder: DefenseCompany; role: AIDeployer, AIDeveloper",
+                "image": "./assets/noun-locked-location-198286.png",
+                "color": "#51B2DB"
+              }
+            },
+            "USPD": {
+              "metadata": {
+                "id": "USPD",
+                "name": "US Local Police",
+                "type": "Police",
+                "airo:type": "AIDeployer",
+                "hover": "name: US Local Police; stakeholder: Police; role: AIDeployer",
+                "image": "./assets/noun-riot-control-national-guards-1584300.png",
+                "color": "#51B2DB"
+              }
+            },
+            "201V": {
+              "metadata": {
+                "id": "201V",
+                "name": "201 Ventures",
+                "type": "Investor",
+                "airo:type": "AIDeveloper",
+                "hover": "name: 201 Ventures; stakeholder: Investor; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Delian": {
+              "metadata": {
+                "id": "Delian",
+                "name": "Delian",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Delian; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51DBAB"
+              }
+            },
+            "NIF": {
+              "metadata": {
+                "id": "NIF",
+                "name": "Nato Innovation Fund",
+                "type": "Investor",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Nato Innovation Fund; stakeholder: Investor; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Tekever": {
+              "metadata": {
+                "id": "Tekever",
+                "name": "Tekever",
+                "type": "AID",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Tekever; stakeholder: AID; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Portugal": {
+              "metadata": {
+                "id": "Portugal",
+                "name": "Portugal",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: Portugal; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Greece": {
+              "metadata": {
+                "id": "Greece",
+                "name": "Greece",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: Greece; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Airbus": {
+              "metadata": {
+                "id": "Airbus",
+                "name": "Airbus",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeployer",
+                "hover": "name: Airbus; stakeholder: DefenseCompany; role: AIDeployer",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#5186DB"
+              }
+            },
+            "Fraunhofer": {
+              "metadata": {
+                "id": "Fraunhofer",
+                "name": "Fraunhofer Institutes",
+                "type": "Institution",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Fraunhofer Institutes; stakeholder: Institution; role: AIDeveloper",
+                "image": "./assets/noun-research-center-198322.png",
+                "color": "#51DBAB"
+              }
+            },
+            "ARX": {
+              "metadata": {
+                "id": "ARX",
+                "name": "ARX Robotics",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: ARX Robotics; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#51DBAB"
+              }
+            },
+            "BailleGifford": {
+              "metadata": {
+                "id": "BailleGifford",
+                "name": "Baillie Gifford",
+                "type": "Investor",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Baillie Gifford; stakeholder: Investor; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#51DBAB"
+              }
+            },
+            "ShieldAI": {
+              "metadata": {
+                "id": "ShieldAI",
+                "name": "Shield AI",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Shield AI; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#5186DB"
+              }
+            },
+            "McKinsey": {
+              "metadata": {
+                "id": "McKinsey",
+                "name": "McKinsey",
+                "type": "Investor",
+                "airo:type": "AIDeveloper",
+                "hover": "name: McKinsey; stakeholder: Investor; role: AIDeveloper",
+                "image": "./assets/noun-museum-198296.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Teledyne": {
+              "metadata": {
+                "id": "Teledyne",
+                "name": "Teledyne FLIR",
+                "type": "TechCompany",
+                "airo:type": "AIDeveloper",
+                "hover": "name: Teledyne FLIR; stakeholder: TechCompany; role: AIDeveloper",
+                "image": "./assets/noun-software-industry-198331.png",
+                "color": "#5186DB"
+              }
+            },
+            "Italy": {
+              "metadata": {
+                "id": "Italy",
+                "name": "Italy",
+                "type": "Nation",
+                "airo:type": "AIDeployer",
+                "hover": "name: Italy; stakeholder: Nation; role: AIDeployer",
+                "image": "./assets/noun-flagged-location-198290.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Leonardo": {
+              "metadata": {
+                "id": "Leonardo",
+                "name": "Leonardo",
+                "type": "DefenseCompany",
+                "airo:type": "AIDeployer",
+                "hover": "name: Leonardo; stakeholder: DefenseCompany; role: AIDeployer",
+                "image": "./assets/noun-radiation-205518.png",
+                "color": "#51DBAB"
+              }
+            },
+            "Luckey": {
+              "metadata": {
+                "id": "Luckey",
+                "name": "Palmer Luckey",
+                "type": "Owner, Investor",
+                "hover": "name: Palmer Luckey; role: Owner, Investor",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#5186DB"
+              }
+            },
+            "Musk": {
+              "metadata": {
+                "id": "Musk",
+                "name": "Elon Musk",
+                "type": "Owner, Investor",
+                "hover": "name: Elon Musk; role: Owner, Investor",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#5186DB"
+              }
+            },
+            "Thiel": {
+              "metadata": {
+                "id": "Thiel",
+                "name": "Peter Thiel",
+                "type": "Owner, Investor",
+                "hover": "name: Peter Thiel; role: Owner, Investor",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Ellison": {
+              "metadata": {
+                "id": "Ellison",
+                "name": "Larry Ellison",
+                "type": "Owner, Investor",
+                "hover": "name: Larry Ellison; role: Owner, Investor",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#515ADB"
+              }
+            },
+            "Fink": {
+              "metadata": {
+                "id": "Fink",
+                "name": "Larry Fink",
+                "type": "CEO, Investor",
+                "hover": "name: Larry Fink; role: CEO, Investor",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Vance": {
+              "metadata": {
+                "id": "Vance",
+                "name": "JD Vance",
+                "type": "Investor, Politician",
+                "hover": "name: JD Vance; role: Investor, Politician",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#5186DB"
+              }
+            },
+            "Ek": {
+              "metadata": {
+                "id": "Ek",
+                "name": "Daniel Ek",
+                "type": "Owner, Investor",
+                "hover": "name: Daniel Ek; role: Owner, Investor",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Scherf": {
+              "metadata": {
+                "id": "Scherf",
+                "name": "Gundbert Scherf",
+                "type": "Owner",
+                "hover": "name: Gundbert Scherf; role: Owner",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Reil": {
+              "metadata": {
+                "id": "Reil",
+                "name": "Torsten Reil",
+                "type": "Owner",
+                "hover": "name: Torsten Reil; role: Owner",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#51B2DB"
+              }
+            },
+            "Rosen": {
+              "metadata": {
+                "id": "Rosen",
+                "name": "Guy Rosen",
+                "type": "Chief Information Security Officer",
+                "hover": "name: Guy Rosen; role: Chief Information Security Officer",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#515ADB"
+              }
+            },
+            "Rappaport": {
+              "metadata": {
+                "id": "Rappaport",
+                "name": "Assaf Rappaport",
+                "type": "Owner",
+                "hover": "name: Assaf Rappaport; role: Owner",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#51DBD9"
+              }
+            },
+            "Karp": {
+              "metadata": {
+                "id": "Karp",
+                "name": "Alex Karp",
+                "type": "Owner",
+                "hover": "name: Alex Karp; role: Owner",
+                "image": "./assets/noun-person-2649456.png",
+                "color": "#51B2DB"
               }
             }
           },
-          edges: [
+          "edges": [
             {
-              source: "LargeGeospatialModels",
-              target: "US",
-              label: "employed"
+              "source": "US",
+              "target": "LargeGeospatialModels",
+              "label": "proposed relationship"
             },
             {
-              source: "LargeGeospatialModels",
-              target: "Niantic",
-              label: "developed"
+              "source": "US",
+              "target": "PolygraphPlus",
+              "label": "employed"
             },
             {
-              source: "LargeGeospatialModels",
-              target: "Scopley",
-              label: "developed"
+              "source": "Israel",
+              "target": "Lavender",
+              "label": "employed"
             },
             {
-              source: "LargeGeospatialModels",
-              target: "Saudi",
-              label: "developed"
-            },
-            { source: "US", target: "PolygraphPlus", label: "developed" },
-            { source: "US", target: "AIP", label: "employed" },
-            { source: "US", target: "MetaConstellation", label: "employed" },
-            { source: "US", target: "Clearview", label: "used in" },
-            { source: "US", target: "JEDI", label: "employed" },
-            { source: "US", target: "Starshield", label: "employed" },
-            { source: "US", target: "Starlink", label: "employed" },
-            { source: "US", target: "URSA", label: "employed" },
-            { source: "US", target: "Maven", label: "employed" },
-            { source: "US", target: "PackBot", label: "employed" },
-            { source: "US", target: "Skynet-US", label: "developed" },
-            { source: "US", target: "Pegasus", label: "employed" },
-            { source: "US", target: "PRISM", label: "developed" },
-            { source: "US", target: "DynaSpeak", label: "employed" },
-            { source: "US", target: "CALO", label: "employed" },
-            { source: "US", target: "Lattice", label: "employed" },
-            { source: "US", target: "LAW", label: "developed" },
-            { source: "US", target: "Arlington", label: "based in" },
-            { source: "US", target: "DARPA", label: "part of" },
-            { source: "US", target: "ICE", label: "part of" },
-            { source: "US", target: "NATO", label: "part of" },
-            { source: "PolygraphPlus", target: "Presage", label: "developed" },
-            { source: "PolygraphPlus", target: "Altec", label: "developed" },
-            { source: "Lavender", target: "Israel", label: "employed" },
-            { source: "Lavender", target: "Unit8200", label: "developed" },
-            { source: "Lavender", target: "Palestine", label: "used in" },
-            {
-              source: "Lavender",
-              target: "WhatsApp",
-              label: "provides data to"
-            },
-            { source: "Israel", target: "WheresDaddy", label: "employed" },
-            { source: "Israel", target: "LegionX", label: "employed" },
-            { source: "Israel", target: "WolfPack", label: "employed" },
-            { source: "Israel", target: "Gospel", label: "employed" },
-            { source: "Israel", target: "Alchemist", label: "employed" },
-            { source: "Israel", target: "Nimbus", label: "employed" },
-            { source: "Israel", target: "ARCA", label: "employed" },
-            { source: "Israel", target: "FireWeaver", label: "employed" },
-            { source: "Israel", target: "FireFactory", label: "employed" },
-            { source: "Israel", target: "RedWolf", label: "developed" },
-            { source: "Israel", target: "BlueWolf", label: "developed" },
-            { source: "Israel", target: "Mabat2000", label: "employed" },
-            { source: "Israel", target: "SentryTech", label: "employed" },
-            { source: "Israel", target: "Pegasus", label: "employed" },
-            { source: "Israel", target: "LAW", label: "developed" },
-            { source: "Israel", target: "NSO", label: "based in" },
-            { source: "Israel", target: "GTR", label: "based in" },
-            { source: "Israel", target: "Unit8200", label: "part of" },
-            { source: "Israel", target: "Oracle", label: "affiliated" },
-            { source: "Israel", target: "Mamram", label: "part of" },
-            { source: "WheresDaddy", target: "Unit8200", label: "developed" },
-            { source: "LegionX", target: "Elbit", label: "developed" },
-            { source: "WolfPack", target: "Unit8200", label: "developed" },
-            { source: "AIP", target: "Palantir", label: "developed" },
-            {
-              source: "MetaConstellation",
-              target: "Ukraine",
-              label: "employed"
+              "source": "Israel",
+              "target": "WheresDaddy",
+              "label": "employed"
             },
             {
-              source: "MetaConstellation",
-              target: "Palantir",
-              label: "developed"
+              "source": "Israel",
+              "target": "LegionX",
+              "label": "employed"
             },
-            { source: "Clearview", target: "Ukraine", label: "employed" },
-            { source: "Clearview", target: "ClearviewAI", label: "developed" },
-            { source: "Clearview", target: "AFRS", label: "similar" },
-            { source: "Wolly", target: "Ukraine", label: "employed" },
-            { source: "Wolly", target: "Roboneers", label: "developed" },
-            { source: "Wolly", target: "D3", label: "developed" },
-            { source: "Wolly", target: "Helsing", label: "developed" },
-            { source: "Ukraine", target: "FirstPOVDrones", label: "employed" },
-            { source: "Ukraine", target: "GISArta", label: "developed" },
-            { source: "Ukraine", target: "Starlink", label: "employed" },
-            { source: "FirstPOVDrones", target: "Vyriy", label: "developed" },
-            { source: "FirstPOVDrones", target: "PG", label: "developed" },
-            { source: "FirstPOVDrones", target: "Skyeton", label: "developed" },
-            { source: "FirstPOVDrones", target: "Swarmer", label: "developed" },
-            { source: "MAPLE", target: "UK", label: "employed" },
-            { source: "MAPLE", target: "UKDSTL", label: "developed" },
-            { source: "MAPLE", target: "QinetiQ", label: "developed" },
-            { source: "UK", target: "GTR", label: "based in" },
-            { source: "UK", target: "Hyperoptic", label: "based in" },
-            { source: "UK", target: "UKDSTL", label: "part of" },
-            { source: "UK", target: "UKDES", label: "part of" },
-            { source: "UK", target: "NHS", label: "part of" },
-            { source: "UK", target: "NATO", label: "part of" },
-            { source: "Gospel", target: "Unit8200", label: "developed" },
-            { source: "Alchemist", target: "Unit8200", label: "developed" },
-            { source: "Nimbus", target: "Google", label: "developed" },
-            { source: "Nimbus", target: "AWS", label: "developed" },
-            { source: "ARCA", target: "Elbit", label: "developed" },
-            { source: "LAW", target: "Libya", label: "employed" },
-            { source: "LAW", target: "Russia", label: "employed" },
-            { source: "LAW", target: "Azerbaijan", label: "employed" },
-            { source: "LAW", target: "Turkey", label: "developed" },
-            { source: "Gotham", target: "Palantir", label: "developed" },
-            { source: "Gotham", target: "DanishNP", label: "employed" },
-            { source: "Palantir", target: "Llama", label: "employed" },
-            { source: "Palantir", target: "Foundry", label: "developed" },
-            { source: "Palantir", target: "Helsing", label: "affiliated" },
-            { source: "Palantir", target: "Anthropic", label: "affiliated" },
             {
-              source: "Palantir",
-              target: "Landeskriminalamt-NRW",
-              label: "contracts"
+              "source": "Israel",
+              "target": "WolfPack",
+              "label": "employed"
             },
-            { source: "JEDI", target: "DARPA", label: "developed" },
-            { source: "JEDI", target: "Oracle", label: "developed" },
-            { source: "JEDI", target: "IBM", label: "developed" },
-            { source: "JEDI", target: "GoogleCloud", label: "developed" },
-            { source: "JEDI", target: "Microsoft", label: "developed" },
-            { source: "JEDI", target: "AWS", label: "developed" },
-            { source: "FireWeaver", target: "Raphael", label: "developed" },
-            { source: "FireWeaver", target: "Lebanon", label: "used in" },
-            { source: "FireFactory", target: "Raphael", label: "developed" },
-            { source: "DIAS", target: "Germany", label: "developed" },
-            { source: "Germany", target: "TacNet", label: "employed" },
-            { source: "Germany", target: "Vantage", label: "based in" },
-            { source: "Germany", target: "Translator", label: "used in" },
             {
-              source: "Germany",
-              target: "Landeskriminalamt-NRW",
-              label: "based in"
+              "source": "US",
+              "target": "AIP",
+              "label": "employed"
             },
-            { source: "Germany", target: "NATO", label: "part of" },
-            { source: "AFRS", target: "India", label: "developed" },
-            { source: "Starshield", target: "SpaceX", label: "developed" },
-            { source: "Starlink", target: "SpaceX", label: "developed" },
-            { source: "Pantir-SM", target: "Russia", label: "developed" },
-            { source: "Russia", target: "Bylina", label: "developed" },
-            { source: "Mabat2000", target: "TKH", label: "developed" },
-            { source: "Mabat2000", target: "Hikvision", label: "developed" },
-            { source: "Mabat2000", target: "BlackRock", label: "developed" },
-            { source: "URSA", target: "DARPA", label: "developed" },
-            { source: "TacNet", target: "Rheinmetall", label: "developed" },
-            { source: "Bylina", target: "Syria", label: "developed" },
-            { source: "Syria", target: "Jordan", label: "refugees from" },
-            { source: "Syria", target: "UNHCR", label: "affiliated" },
-            { source: "Maven", target: "Google", label: "developed" },
-            { source: "PackBot", target: "Arlington", label: "developed" },
-            { source: "PackBot", target: "Endeavor", label: "developed" },
-            { source: "PackBot", target: "iRobot", label: "developed" },
-            { source: "IrisGuard", target: "Jordan", label: "used in" },
-            { source: "IrisGuard", target: "UNHCR", label: "employed" },
-            { source: "Jordan", target: "UNHCR", label: "affiliated" },
-            { source: "RobotRiotControl", target: "China", label: "developed" },
             {
-              source: "RobotRiotControl",
-              target: "SouthKorea",
-              label: "developed"
+              "source": "US",
+              "target": "MetaConstellation",
+              "label": "employed"
             },
-            { source: "China", target: "GoldenShield", label: "developed" },
-            { source: "China", target: "SharpEyes", label: "developed" },
-            { source: "China", target: "Skynet-PRC", label: "developed" },
-            { source: "China", target: "BlackRock", label: "affiliated" },
-            { source: "China", target: "PLA-PRC", label: "part of" },
-            { source: "PrisonGuard", target: "SouthKorea", label: "employed" },
             {
-              source: "PrisonGuard",
-              target: "KyonggiUniversity",
-              label: "developed"
+              "source": "US",
+              "target": "Clearview",
+              "label": "employed"
             },
-            { source: "SouthKorea", target: "SuperAegis", label: "employed" },
-            { source: "SouthKorea", target: "SentryRobot", label: "employed" },
             {
-              source: "SouthKorea",
-              target: "KyonggiUniversity",
-              label: "based in"
+              "source": "Ukraine",
+              "target": "Wolly",
+              "label": "employed"
             },
-            { source: "Pegasus", target: "NSO", label: "developed" },
-            { source: "SentryTech", target: "Raphael", label: "developed" },
-            { source: "SuperAegis", target: "DoDAAM", label: "developed" },
             {
-              source: "SentryRobot",
-              target: "HanwhaTechwin-Samsung",
-              label: "developed"
+              "source": "Ukraine",
+              "target": "FirstPOVDrones",
+              "label": "employed"
             },
-            { source: "DynaSpeak", target: "SRI", label: "developed" },
-            { source: "CALO", target: "DARPA", label: "developed" },
-            { source: "CALO", target: "SRI", label: "developed" },
-            { source: "CALO", target: "SwissInstitute", label: "developed" },
-            { source: "UNHCR", target: "Palestine", label: "affiliated" },
-            { source: "ARPANET", target: "MIT", label: "employed" },
-            { source: "ARPANET", target: "DARPA", label: "developed" },
-            { source: "ARPANET", target: "Stanford", label: "affiliated" },
-            { source: "MIT", target: "ELIZA", label: "affiliated" },
-            { source: "Lattice", target: "Anduril", label: "developed" },
-            { source: "Lattice", target: "OpenAI", label: "developed" },
-            { source: "Llama", target: "Lockheed", label: "incorporates" },
-            { source: "Llama", target: "Booz", label: "affiliated" },
-            { source: "Llama", target: "Meta", label: "developed" },
-            { source: "Llama", target: "PLA-PRC", label: "incorporates" },
-            { source: "Llama", target: "Anduril", label: "affiliated" },
-            { source: "Llama", target: "Accenture", label: "affiliated" },
-            { source: "Llama", target: "Deloitte", label: "affiliated" },
-            { source: "Llama", target: "IBM", label: "affiliated" },
-            { source: "Llama", target: "Oracle", label: "affiliated" },
-            { source: "Llama", target: "Databricks", label: "affiliated" },
-            { source: "Llama", target: "Leidos", label: "affiliated" },
-            { source: "Llama", target: "ScaleAI", label: "affiliated" },
-            { source: "Llama", target: "Snowflake", label: "affiliated" },
-            { source: "Foundry", target: "ICE", label: "employed" },
-            { source: "Foundry", target: "NHS", label: "employed" },
-            { source: "DanishNP", target: "Denmark", label: "based in" },
-            { source: "Niantic", target: "Pokemon", label: "developed" },
-            { source: "Niantic", target: "Scopley", label: "sold to" },
-            { source: "Google", target: "Gemini", label: "developed" },
-            { source: "Google", target: "GoogleCloud", label: "part of" },
-            { source: "Google", target: "Alphabet", label: "part of" },
-            { source: "AWS", target: "Anthropic", label: "affiliated" },
-            { source: "AWS", target: "Amazon", label: "part of" },
-            { source: "SRI", target: "Stanford", label: "affiliated" },
-            { source: "IBM", target: "Dehomag", label: "developed" },
-            { source: "IBM", target: "Translator", label: "developed" },
-            { source: "IBM", target: "Shoebox", label: "developed" },
-            { source: "Microsoft", target: "Hololens", label: "developed" },
-            { source: "Microsoft", target: "OpenAI", label: "part of" },
-            { source: "Microsoft", target: "Azure", label: "part of" },
-            { source: "Endeavor", target: "iRobot", label: "renamed" },
-            { source: "BlackRock", target: "Stanford", label: "affiliated" },
-            { source: "Roomba", target: "iRobot", label: "developed" },
-            { source: "Claude", target: "Anthropic", label: "developed" },
-            { source: "Meta", target: "Facebook", label: "developed" },
-            { source: "Meta", target: "WhatsApp", label: "developed" },
-            { source: "Anduril", target: "Oculus", label: "affiliated" },
-            { source: "Anduril", target: "Azure", label: "relies on" },
-            { source: "OpenAI", target: "ChatGPT", label: "developed" },
-            { source: "Gemini", target: "Vertex", label: "affiliated" },
-            { source: "DoorDash", target: "KKR", label: "developed" },
-            { source: "KKR", target: "GTR", label: "part of" },
-            { source: "KKR", target: "Vantage", label: "part of" },
-            { source: "KKR", target: "Hyperoptic", label: "part of" },
-            { source: "GTR", target: "Spain", label: "based in" },
-            { source: "Spain", target: "Vantage", label: "based in" },
-            { source: "Spain", target: "NATO", label: "part of" },
-            { source: "Denmark", target: "NATO", label: "part of" },
-            { source: "DIANA", target: "NATO", label: "part of" }
+            {
+              "source": "UK",
+              "target": "MAPLE",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "Gospel",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "Alchemist",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "Nimbus",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "ARCA",
+              "label": "employed"
+            },
+            {
+              "source": "Libya",
+              "target": "LAW",
+              "label": "employed"
+            },
+            {
+              "source": "Palantir",
+              "target": "Gotham",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "JEDI",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "FireWeaver",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "FireFactory",
+              "label": "employed"
+            },
+            {
+              "source": "Germany",
+              "target": "DIAS",
+              "label": "employed"
+            },
+            {
+              "source": "India",
+              "target": "AFRS",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "Starshield",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "Starlink",
+              "label": "employed"
+            },
+            {
+              "source": "Russia",
+              "target": "Pantir-SM",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "RedWolf",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "BlueWolf",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "Mabat2000",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "URSA",
+              "label": "employed"
+            },
+            {
+              "source": "Germany",
+              "target": "TacNet",
+              "label": "employed"
+            },
+            {
+              "source": "Syria",
+              "target": "Bylina",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "Maven",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "PackBot",
+              "label": "employed"
+            },
+            {
+              "source": "Ukraine",
+              "target": "GISArta",
+              "label": "employed"
+            },
+            {
+              "source": "Jordan",
+              "target": "IrisGuard",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "Skynet-US",
+              "label": "employed"
+            },
+            {
+              "source": "China",
+              "target": "RobotRiotControl",
+              "label": "employed"
+            },
+            {
+              "source": "SouthKorea",
+              "target": "PrisonGuard",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "Pegasus",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "SentryTech",
+              "label": "employed"
+            },
+            {
+              "source": "SouthKorea",
+              "target": "SuperAegis",
+              "label": "employed"
+            },
+            {
+              "source": "SouthKorea",
+              "target": "SentryRobot",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "PRISM",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "DynaSpeak",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "CALO",
+              "label": "employed"
+            },
+            {
+              "source": "China",
+              "target": "GoldenShield",
+              "label": "employed"
+            },
+            {
+              "source": "China",
+              "target": "SharpEyes",
+              "label": "employed"
+            },
+            {
+              "source": "China",
+              "target": "Skynet-PRC",
+              "label": "employed"
+            },
+            {
+              "source": "Ukraine",
+              "target": "MetaConstellation",
+              "label": "employed"
+            },
+            {
+              "source": "Ukraine",
+              "target": "Clearview",
+              "label": "employed"
+            },
+            {
+              "source": "UNHCR",
+              "target": "IrisGuard",
+              "label": "employed"
+            },
+            {
+              "source": "Russia",
+              "target": "Bylina",
+              "label": "employed"
+            },
+            {
+              "source": "Russia",
+              "target": "LAW",
+              "label": "employed"
+            },
+            {
+              "source": "Azerbaijan",
+              "target": "LAW",
+              "label": "employed"
+            },
+            {
+              "source": "Ukraine",
+              "target": "Starlink",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "Pegasus",
+              "label": "employed"
+            },
+            {
+              "source": "MIT",
+              "target": "ARPANET",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "Lattice",
+              "label": "employed"
+            },
+            {
+              "source": "Lockheed",
+              "target": "Llama",
+              "label": "employed"
+            },
+            {
+              "source": "Palantir",
+              "target": "Llama",
+              "label": "employed"
+            },
+            {
+              "source": "Booz",
+              "target": "Llama",
+              "label": "employed"
+            },
+            {
+              "source": "ICE",
+              "target": "Foundry",
+              "label": "employed"
+            },
+            {
+              "source": "NHS",
+              "target": "Foundry",
+              "label": "employed"
+            },
+            {
+              "source": "DanishNP",
+              "target": "Gotham",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "Medicare",
+              "label": "employed"
+            },
+            {
+              "source": "ICE",
+              "target": "Fortify",
+              "label": "employed"
+            },
+            {
+              "source": "Israel",
+              "target": "Fortify",
+              "label": "employed"
+            },
+            {
+              "source": "Unit8200",
+              "target": "Fortify",
+              "label": "employed"
+            },
+            {
+              "source": "CBP",
+              "target": "Fortify",
+              "label": "employed"
+            },
+            {
+              "source": "Jericho",
+              "target": "UK",
+              "label": "employed"
+            },
+            {
+              "source": "UK",
+              "target": "Atlas",
+              "label": "employed"
+            },
+            {
+              "source": "Airbus",
+              "target": "Hivemind",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "Hivemind",
+              "label": "employed"
+            },
+            {
+              "source": "Landeskriminalamt",
+              "target": "Gotham",
+              "label": "employed"
+            },
+            {
+              "source": "ICE",
+              "target": "Axon",
+              "label": "employed"
+            },
+            {
+              "source": "CBP",
+              "target": "Sentry",
+              "label": "employed"
+            },
+            {
+              "source": "CBP",
+              "target": "Lattice",
+              "label": "employed"
+            },
+            {
+              "source": "US",
+              "target": "Donovan",
+              "label": "employed"
+            },
+            {
+              "source": "Niantic",
+              "target": "LargeGeospatialModels",
+              "label": "developed"
+            },
+            {
+              "source": "US",
+              "target": "PolygraphPlus",
+              "label": "developed"
+            },
+            {
+              "source": "Unit8200",
+              "target": "Lavender",
+              "label": "developed"
+            },
+            {
+              "source": "Unit8200",
+              "target": "WheresDaddy",
+              "label": "developed"
+            },
+            {
+              "source": "Elbit",
+              "target": "LegionX",
+              "label": "developed"
+            },
+            {
+              "source": "Unit8200",
+              "target": "WolfPack",
+              "label": "developed"
+            },
+            {
+              "source": "Palantir",
+              "target": "AIP",
+              "label": "developed"
+            },
+            {
+              "source": "Palantir",
+              "target": "MetaConstellation",
+              "label": "developed"
+            },
+            {
+              "source": "ClearviewAI",
+              "target": "Clearview",
+              "label": "developed"
+            },
+            {
+              "source": "Roboneers",
+              "target": "Wolly",
+              "label": "developed"
+            },
+            {
+              "source": "Vyriy",
+              "target": "FirstPOVDrones",
+              "label": "developed"
+            },
+            {
+              "source": "PG",
+              "target": "FirstPOVDrones",
+              "label": "developed"
+            },
+            {
+              "source": "UKDSTL",
+              "target": "MAPLE",
+              "label": "developed"
+            },
+            {
+              "source": "Unit8200",
+              "target": "Gospel",
+              "label": "developed"
+            },
+            {
+              "source": "Unit8200",
+              "target": "Alchemist",
+              "label": "developed"
+            },
+            {
+              "source": "Google",
+              "target": "Nimbus",
+              "label": "developed"
+            },
+            {
+              "source": "AWS",
+              "target": "Nimbus",
+              "label": "developed"
+            },
+            {
+              "source": "Elbit",
+              "target": "ARCA",
+              "label": "developed"
+            },
+            {
+              "source": "US",
+              "target": "LAW",
+              "label": "developed"
+            },
+            {
+              "source": "Palantir",
+              "target": "Gotham",
+              "label": "developed"
+            },
+            {
+              "source": "DARPA",
+              "target": "JEDI",
+              "label": "developed"
+            },
+            {
+              "source": "Rafael",
+              "target": "FireWeaver",
+              "label": "developed"
+            },
+            {
+              "source": "Rafael",
+              "target": "FireFactory",
+              "label": "developed"
+            },
+            {
+              "source": "Germany",
+              "target": "DIAS",
+              "label": "developed"
+            },
+            {
+              "source": "India",
+              "target": "AFRS",
+              "label": "developed"
+            },
+            {
+              "source": "SpaceX",
+              "target": "Starshield",
+              "label": "developed"
+            },
+            {
+              "source": "SpaceX",
+              "target": "Starlink",
+              "label": "developed"
+            },
+            {
+              "source": "Russia",
+              "target": "Pantir-SM",
+              "label": "developed"
+            },
+            {
+              "source": "Israel",
+              "target": "RedWolf",
+              "label": "developed"
+            },
+            {
+              "source": "Israel",
+              "target": "BlueWolf",
+              "label": "developed"
+            },
+            {
+              "source": "TKH",
+              "target": "Mabat2000",
+              "label": "developed"
+            },
+            {
+              "source": "DARPA",
+              "target": "URSA",
+              "label": "developed"
+            },
+            {
+              "source": "Rheinmetall",
+              "target": "TacNet",
+              "label": "developed"
+            },
+            {
+              "source": "Syria",
+              "target": "Bylina",
+              "label": "developed"
+            },
+            {
+              "source": "Google",
+              "target": "Maven",
+              "label": "developed"
+            },
+            {
+              "source": "MIT",
+              "target": "ARPANET",
+              "label": "developed"
+            },
+            {
+              "source": "Ukraine",
+              "target": "GISArta",
+              "label": "developed"
+            },
+            {
+              "source": "US",
+              "target": "Skynet-US",
+              "label": "developed"
+            },
+            {
+              "source": "China",
+              "target": "RobotRiotControl",
+              "label": "developed"
+            },
+            {
+              "source": "KyonggiUniversity",
+              "target": "PrisonGuard",
+              "label": "developed"
+            },
+            {
+              "source": "NSO",
+              "target": "Pegasus",
+              "label": "developed"
+            },
+            {
+              "source": "Rafael",
+              "target": "SentryTech",
+              "label": "developed"
+            },
+            {
+              "source": "DoDAAM",
+              "target": "SuperAegis",
+              "label": "developed"
+            },
+            {
+              "source": "HanwhaTechwin-Samsung",
+              "target": "SentryRobot",
+              "label": "developed"
+            },
+            {
+              "source": "US",
+              "target": "PRISM",
+              "label": "developed"
+            },
+            {
+              "source": "SRI",
+              "target": "DynaSpeak",
+              "label": "developed"
+            },
+            {
+              "source": "DARPA",
+              "target": "CALO",
+              "label": "developed"
+            },
+            {
+              "source": "China",
+              "target": "GoldenShield",
+              "label": "developed"
+            },
+            {
+              "source": "China",
+              "target": "SharpEyes",
+              "label": "developed"
+            },
+            {
+              "source": "China",
+              "target": "Skynet-PRC",
+              "label": "developed"
+            },
+            {
+              "source": "SRI",
+              "target": "CALO",
+              "label": "developed"
+            },
+            {
+              "source": "SwissInstitute",
+              "target": "CALO",
+              "label": "developed"
+            },
+            {
+              "source": "SouthKorea",
+              "target": "RobotRiotControl",
+              "label": "developed"
+            },
+            {
+              "source": "Russia",
+              "target": "Bylina",
+              "label": "developed"
+            },
+            {
+              "source": "Hikvision",
+              "target": "Mabat2000",
+              "label": "developed"
+            },
+            {
+              "source": "Turkey",
+              "target": "LAW",
+              "label": "developed"
+            },
+            {
+              "source": "Israel",
+              "target": "LAW",
+              "label": "developed"
+            },
+            {
+              "source": "Skyeton",
+              "target": "FirstPOVDrones",
+              "label": "developed"
+            },
+            {
+              "source": "Swarmer",
+              "target": "FirstPOVDrones",
+              "label": "developed"
+            },
+            {
+              "source": "D3",
+              "target": "Wolly",
+              "label": "developed"
+            },
+            {
+              "source": "Presage",
+              "target": "PolygraphPlus",
+              "label": "developed"
+            },
+            {
+              "source": "Altec",
+              "target": "PolygraphPlus",
+              "label": "developed"
+            },
+            {
+              "source": "Oracle",
+              "target": "JEDI",
+              "label": "developed"
+            },
+            {
+              "source": "IBM",
+              "target": "JEDI",
+              "label": "developed"
+            },
+            {
+              "source": "GoogleCloud",
+              "target": "JEDI",
+              "label": "developed"
+            },
+            {
+              "source": "Microsoft",
+              "target": "JEDI",
+              "label": "developed"
+            },
+            {
+              "source": "AWS",
+              "target": "JEDI",
+              "label": "developed"
+            },
+            {
+              "source": "Helsing",
+              "target": "Wolly",
+              "label": "developed"
+            },
+            {
+              "source": "QinetiQ",
+              "target": "MAPLE",
+              "label": "developed"
+            },
+            {
+              "source": "Endeavor",
+              "target": "PackBot",
+              "label": "developed"
+            },
+            {
+              "source": "Blackrock",
+              "target": "Mabat2000",
+              "label": "developed"
+            },
+            {
+              "source": "iRobot",
+              "target": "Roomba",
+              "label": "developed"
+            },
+            {
+              "source": "Anthropic",
+              "target": "Claude",
+              "label": "developed"
+            },
+            {
+              "source": "Meta",
+              "target": "Llama",
+              "label": "developed"
+            },
+            {
+              "source": "Meta",
+              "target": "Facebook",
+              "label": "developed"
+            },
+            {
+              "source": "Meta",
+              "target": "WhatsApp",
+              "label": "developed"
+            },
+            {
+              "source": "iRobot",
+              "target": "PackBot",
+              "label": "developed"
+            },
+            {
+              "source": "Anduril",
+              "target": "Lattice",
+              "label": "developed"
+            },
+            {
+              "source": "OpenAI",
+              "target": "Lattice",
+              "label": "developed"
+            },
+            {
+              "source": "OpenAI",
+              "target": "ChatGPT",
+              "label": "developed"
+            },
+            {
+              "source": "Google",
+              "target": "Gemini",
+              "label": "developed"
+            },
+            {
+              "source": "KKR",
+              "target": "DoorDash",
+              "label": "developed"
+            },
+            {
+              "source": "Microsoft",
+              "target": "Hololens",
+              "label": "developed"
+            },
+            {
+              "source": "Saudi",
+              "target": "LargeGeospatialModels",
+              "label": "developed"
+            },
+            {
+              "source": "Niantic",
+              "target": "Pokemon",
+              "label": "developed"
+            },
+            {
+              "source": "IBM",
+              "target": "Dehomag",
+              "label": "developed"
+            },
+            {
+              "source": "IBM",
+              "target": "Translator",
+              "label": "developed"
+            },
+            {
+              "source": "IBM",
+              "target": "Shoebox",
+              "label": "developed"
+            },
+            {
+              "source": "Palantir",
+              "target": "Foundry",
+              "label": "developed"
+            },
+            {
+              "source": "DARPA",
+              "target": "ARPANET",
+              "label": "developed"
+            },
+            {
+              "source": "Apple",
+              "target": "Siri",
+              "label": "developed"
+            },
+            {
+              "source": "Palantir",
+              "target": "Maven",
+              "label": "developed"
+            },
+            {
+              "source": "GDIT",
+              "target": "Medicare",
+              "label": "developed"
+            },
+            {
+              "source": "Corsight",
+              "target": "Fortify",
+              "label": "developed"
+            },
+            {
+              "source": "Anduril",
+              "target": "Sentry",
+              "label": "developed"
+            },
+            {
+              "source": "Mantacus",
+              "target": "DIANA",
+              "label": "developed"
+            },
+            {
+              "source": "QS",
+              "target": "Vector",
+              "label": "developed"
+            },
+            {
+              "source": "Anduril",
+              "target": "EagleEye",
+              "label": "developed"
+            },
+            {
+              "source": "US",
+              "target": "EagleEye",
+              "label": "developed"
+            },
+            {
+              "source": "Delian",
+              "target": "Jericho",
+              "label": "developed"
+            },
+            {
+              "source": "Tekever",
+              "target": "Atlas",
+              "label": "developed"
+            },
+            {
+              "source": "ARX",
+              "target": "Mithra",
+              "label": "developed"
+            },
+            {
+              "source": "ScaleAI",
+              "target": "Donovan",
+              "label": "developed"
+            },
+            {
+              "source": "DIU",
+              "target": "Donovan",
+              "label": "developed"
+            },
+            {
+              "source": "ScaleAI",
+              "target": "Outlier",
+              "label": "developed"
+            },
+            {
+              "source": "ShieldAI",
+              "target": "Hivemind",
+              "label": "developed"
+            },
+            {
+              "source": "DIU",
+              "target": "Hivemind",
+              "label": "developed"
+            },
+            {
+              "source": "ScaleAI",
+              "target": "Thunderforge",
+              "label": "developed"
+            },
+            {
+              "source": "Microsoft",
+              "target": "Thunderforge",
+              "label": "developed"
+            },
+            {
+              "source": "Anduril",
+              "target": "Thunderforge",
+              "label": "developed"
+            },
+            {
+              "source": "Helsing",
+              "target": "Centaur",
+              "label": "developed"
+            },
+            {
+              "source": "Helsing",
+              "target": "Altra",
+              "label": "developed"
+            },
+            {
+              "source": "Meta",
+              "target": "Instagram",
+              "label": "developed"
+            },
+            {
+              "source": "Meta",
+              "target": "EagleEye",
+              "label": "developed"
+            },
+            {
+              "source": "Lavender",
+              "target": "Palestine",
+              "label": "used in"
+            },
+            {
+              "source": "Clearview",
+              "target": "US",
+              "label": "used in"
+            },
+            {
+              "source": "IrisGuard",
+              "target": "Jordan",
+              "label": "used in"
+            },
+            {
+              "source": "KyonggiUniversity",
+              "target": "SouthKorea",
+              "label": "based in"
+            },
+            {
+              "source": "NSO",
+              "target": "Israel",
+              "label": "based in"
+            },
+            {
+              "source": "Arlington",
+              "target": "US",
+              "label": "based in"
+            },
+            {
+              "source": "FireWeaver",
+              "target": "Lebanon",
+              "label": "used in"
+            },
+            {
+              "source": "GTR",
+              "target": "UK",
+              "label": "based in"
+            },
+            {
+              "source": "GTR",
+              "target": "Israel",
+              "label": "based in"
+            },
+            {
+              "source": "GTR",
+              "target": "Spain",
+              "label": "based in"
+            },
+            {
+              "source": "Vantage",
+              "target": "Germany",
+              "label": "based in"
+            },
+            {
+              "source": "Hyperoptic",
+              "target": "UK",
+              "label": "based in"
+            },
+            {
+              "source": "Vantage",
+              "target": "Spain",
+              "label": "based in"
+            },
+            {
+              "source": "Translator",
+              "target": "Germany",
+              "label": "used in"
+            },
+            {
+              "source": "Landeskriminalamt",
+              "target": "Germany",
+              "label": "based in"
+            },
+            {
+              "source": "DanishNP",
+              "target": "Denmark",
+              "label": "based in"
+            },
+            {
+              "source": "Corsight",
+              "target": "Israel",
+              "label": "based in"
+            },
+            {
+              "source": "Delian",
+              "target": "Greece",
+              "label": "based in"
+            },
+            {
+              "source": "QS",
+              "target": "Germany",
+              "label": "based in"
+            },
+            {
+              "source": "Helsing",
+              "target": "Germany",
+              "label": "based in"
+            },
+            {
+              "source": "Leonardo",
+              "target": "Italy",
+              "label": "based in"
+            },
+            {
+              "source": "Anthropic",
+              "target": "Venezuela",
+              "label": "used in"
+            },
+            {
+              "source": "Claude",
+              "target": "Venezuela",
+              "label": "used in"
+            },
+            {
+              "source": "AWS",
+              "target": "Venezuela",
+              "label": "used in"
+            },
+            {
+              "source": "Palantir",
+              "target": "Venezuela",
+              "label": "used in"
+            },
+            {
+              "source": "AIP",
+              "target": "Venezuela",
+              "label": "used in"
+            },
+            {
+              "source": "Anthropic",
+              "target": "Iran",
+              "label": "used in"
+            },
+            {
+              "source": "Anthropic",
+              "target": "Iran",
+              "label": "used in"
+            },
+            {
+              "source": "Claude",
+              "target": "Iran",
+              "label": "used in"
+            },
+            {
+              "source": "AWS",
+              "target": "Iran",
+              "label": "used in"
+            },
+            {
+              "source": "Palantir",
+              "target": "Iran",
+              "label": "used in"
+            },
+            {
+              "source": "AIP",
+              "target": "Iran",
+              "label": "used in"
+            },
+            {
+              "source": "DARPA",
+              "target": "US",
+              "label": "part of"
+            },
+            {
+              "source": "Unit8200",
+              "target": "Israel",
+              "label": "part of"
+            },
+            {
+              "source": "UKDSTL",
+              "target": "UK",
+              "label": "part of"
+            },
+            {
+              "source": "UKDES",
+              "target": "UK",
+              "label": "part of"
+            },
+            {
+              "source": "Stanford",
+              "target": "Blackrock",
+              "label": "affiliated"
+            },
+            {
+              "source": "Stanford",
+              "target": "SRI",
+              "label": "affiliated"
+            },
+            {
+              "source": "Palantir",
+              "target": "Helsing",
+              "label": "affiliated"
+            },
+            {
+              "source": "China",
+              "target": "Blackrock",
+              "label": "affiliated"
+            },
+            {
+              "source": "Clearview",
+              "target": "AFRS",
+              "label": "similar"
+            },
+            {
+              "source": "Palantir",
+              "target": "Anthropic",
+              "label": "affiliated"
+            },
+            {
+              "source": "AWS",
+              "target": "Anthropic",
+              "label": "affiliated"
+            },
+            {
+              "source": "Syria",
+              "target": "Jordan",
+              "label": "refugees from"
+            },
+            {
+              "source": "Microsoft",
+              "target": "OpenAI",
+              "label": "invests in"
+            },
+            {
+              "source": "Israel",
+              "target": "Oracle",
+              "label": "contracts"
+            },
+            {
+              "source": "GoogleCloud",
+              "target": "Google",
+              "label": "part of"
+            },
+            {
+              "source": "AWS",
+              "target": "Amazon",
+              "label": "part of"
+            },
+            {
+              "source": "Google",
+              "target": "Alphabet",
+              "label": "part of"
+            },
+            {
+              "source": "Azure",
+              "target": "Microsoft",
+              "label": "part of"
+            },
+            {
+              "source": "Mamram",
+              "target": "Israel",
+              "label": "part of"
+            },
+            {
+              "source": "Lockheed",
+              "target": "Llama",
+              "label": "incorporates"
+            },
+            {
+              "source": "Booz",
+              "target": "Llama",
+              "label": "incorporates"
+            },
+            {
+              "source": "PLA-PRC",
+              "target": "Llama",
+              "label": "incorporates"
+            },
+            {
+              "source": "Anduril",
+              "target": "Llama",
+              "label": "affiliated"
+            },
+            {
+              "source": "Accenture",
+              "target": "Llama",
+              "label": "affiliated"
+            },
+            {
+              "source": "Booz",
+              "target": "Llama",
+              "label": "affiliated"
+            },
+            {
+              "source": "Deloitte",
+              "target": "Llama",
+              "label": "affiliated"
+            },
+            {
+              "source": "IBM",
+              "target": "Llama",
+              "label": "affiliated"
+            },
+            {
+              "source": "Oracle",
+              "target": "Llama",
+              "label": "affiliated"
+            },
+            {
+              "source": "Databricks",
+              "target": "Llama",
+              "label": "affiliated"
+            },
+            {
+              "source": "Leidos",
+              "target": "Llama",
+              "label": "affiliated"
+            },
+            {
+              "source": "ScaleAI",
+              "target": "Llama",
+              "label": "affiliated"
+            },
+            {
+              "source": "Snowflake",
+              "target": "Llama",
+              "label": "affiliated"
+            },
+            {
+              "source": "Gemini",
+              "target": "Vertex",
+              "label": "affiliated"
+            },
+            {
+              "source": "GTR",
+              "target": "KKR",
+              "label": "part of"
+            },
+            {
+              "source": "Vantage",
+              "target": "KKR",
+              "label": "part of"
+            },
+            {
+              "source": "Hyperoptic",
+              "target": "KKR",
+              "label": "part of"
+            },
+            {
+              "source": "Oculus",
+              "target": "Anduril",
+              "label": "affiliated"
+            },
+            {
+              "source": "Azure",
+              "target": "Anduril",
+              "label": "relies on"
+            },
+            {
+              "source": "Palantir",
+              "target": "Landeskriminalamt",
+              "label": "contracts"
+            },
+            {
+              "source": "MIT",
+              "target": "ELIZA",
+              "label": "affiliated"
+            },
+            {
+              "source": "Jordan",
+              "target": "UNHCR",
+              "label": "affiliated"
+            },
+            {
+              "source": "Syria",
+              "target": "UNHCR",
+              "label": "affiliated"
+            },
+            {
+              "source": "Palestine",
+              "target": "UNHCR",
+              "label": "affiliated"
+            },
+            {
+              "source": "China",
+              "target": "PLA-PRC",
+              "label": "part of"
+            },
+            {
+              "source": "NATO",
+              "target": "DIANA",
+              "label": "part of"
+            },
+            {
+              "source": "US",
+              "target": "ICE",
+              "label": "part of"
+            },
+            {
+              "source": "UK",
+              "target": "NHS",
+              "label": "part of"
+            },
+            {
+              "source": "UK",
+              "target": "NATO",
+              "label": "part of"
+            },
+            {
+              "source": "US",
+              "target": "NATO",
+              "label": "part of"
+            },
+            {
+              "source": "Germany",
+              "target": "NATO",
+              "label": "member of"
+            },
+            {
+              "source": "Denmark",
+              "target": "NATO",
+              "label": "member of"
+            },
+            {
+              "source": "Spain",
+              "target": "NATO",
+              "label": "member of"
+            },
+            {
+              "source": "ARPANET",
+              "target": "Stanford",
+              "label": "affiliated"
+            },
+            {
+              "source": "WhatsApp",
+              "target": "Lavender",
+              "label": "provides data to"
+            },
+            {
+              "source": "iRobot",
+              "target": "Endeavor",
+              "label": "sold part of to"
+            },
+            {
+              "source": "Pokemon",
+              "target": "Scopley",
+              "label": "sold to"
+            },
+            {
+              "source": "CALO",
+              "target": "Siri",
+              "label": "based on"
+            },
+            {
+              "source": "Palantir",
+              "target": "ICE",
+              "label": "contracts"
+            },
+            {
+              "source": "Palantir",
+              "target": "DanishNP",
+              "label": "contracts"
+            },
+            {
+              "source": "Palantir",
+              "target": "NHS",
+              "label": "contracts"
+            },
+            {
+              "source": "Palantir",
+              "target": "Booz",
+              "label": "subcontracts",
+              "metadata": {
+                "reference": "sam.gov"
+              }
+            },
+            {
+              "source": "GDIT",
+              "target": "Palantir",
+              "label": "subcontracts",
+              "metadata": {
+                "reference": "sam.gov"
+              }
+            },
+            {
+              "source": "ScaleAI",
+              "target": "Meta",
+              "label": "invests in",
+              "metadata": {
+                "reference": "x"
+              }
+            },
+            {
+              "source": "Blackrock",
+              "target": "Palantir",
+              "label": "invests in",
+              "metadata": {
+                "reference": "UN"
+              }
+            },
+            {
+              "source": "Blackrock",
+              "target": "Amazon",
+              "label": "invests in",
+              "metadata": {
+                "reference": "UN"
+              }
+            },
+            {
+              "source": "Blackrock",
+              "target": "Microsoft",
+              "label": "invests in",
+              "metadata": {
+                "reference": "UN"
+              }
+            },
+            {
+              "source": "Blackrock",
+              "target": "Alphabet",
+              "label": "invests in",
+              "metadata": {
+                "reference": "UN"
+              }
+            },
+            {
+              "source": "Blackrock",
+              "target": "IBM",
+              "label": "invests in",
+              "metadata": {
+                "reference": "UN"
+              }
+            },
+            {
+              "source": "Vanguard",
+              "target": "Palantir",
+              "label": "invests in",
+              "metadata": {
+                "reference": "UN"
+              }
+            },
+            {
+              "source": "IBM",
+              "target": "Horizon",
+              "label": "invests in",
+              "metadata": {
+                "reference": "UN, EU"
+              }
+            },
+            {
+              "source": "DIANA",
+              "target": "Mantacus",
+              "label": "invests in",
+              "metadata": {
+                "reference": "NATO"
+              }
+            },
+            {
+              "source": "DIANA",
+              "target": "AIVerse",
+              "label": "invests in",
+              "metadata": {
+                "reference": "NATO"
+              }
+            },
+            {
+              "source": "DIANA",
+              "target": "Vector",
+              "label": "invests in",
+              "metadata": {
+                "reference": "NATO"
+              }
+            },
+            {
+              "source": "USPD",
+              "target": "Axon",
+              "label": "contracts",
+              "metadata": {
+                "reference": "Press"
+              }
+            },
+            {
+              "source": "Citizen",
+              "target": "Axon",
+              "label": "provides data to",
+              "metadata": {
+                "reference": "Axon"
+              }
+            },
+            {
+              "source": "Ring",
+              "target": "Axon",
+              "label": "provides data to",
+              "metadata": {
+                "reference": "Axon"
+              }
+            },
+            {
+              "source": "Amazon",
+              "target": "Ring",
+              "label": "owns"
+            },
+            {
+              "source": "201V",
+              "target": "Delian",
+              "label": "invests in"
+            },
+            {
+              "source": "Portugal",
+              "target": "Tekever",
+              "label": "contracts",
+              "metadata": {
+                "reference": "Tekever"
+              }
+            },
+            {
+              "source": "NIF",
+              "target": "ARX",
+              "label": "invests in"
+            },
+            {
+              "source": "Portugal",
+              "target": "NATO",
+              "label": "member of"
+            },
+            {
+              "source": "Greece",
+              "target": "NATO",
+              "label": "member of"
+            },
+            {
+              "source": "NIF",
+              "target": "Tekever",
+              "label": "invests in"
+            },
+            {
+              "source": "Airbus",
+              "target": "QS",
+              "label": "partners with"
+            },
+            {
+              "source": "Fraunhofer",
+              "target": "QS",
+              "label": "partners with"
+            },
+            {
+              "source": "BailleGifford",
+              "target": "Tekever",
+              "label": "invests in"
+            },
+            {
+              "source": "BailleGifford",
+              "target": "Spotify",
+              "label": "invests in"
+            },
+            {
+              "source": "Teledyne",
+              "target": "Endeavor",
+              "label": "sold to"
+            },
+            {
+              "source": "DARPA",
+              "target": "iRobot",
+              "label": "contracts"
+            },
+            {
+              "source": "DARPA",
+              "target": "MIT",
+              "label": "contracts"
+            },
+            {
+              "source": "DARPA",
+              "target": "Stanford",
+              "label": "contracts"
+            },
+            {
+              "source": "Arlington",
+              "target": "PackBot",
+              "label": "invested in"
+            },
+            {
+              "source": "Meta",
+              "target": "Onavo",
+              "label": "purchased"
+            },
+            {
+              "source": "Google",
+              "target": "Wiz",
+              "label": "purchased"
+            },
+            {
+              "source": "Italy",
+              "target": "NATO",
+              "label": "member of"
+            },
+            {
+              "source": "OpenAI",
+              "target": "US",
+              "label": "contracts"
+            },
+            {
+              "source": "Luckey",
+              "target": "Oculus",
+              "label": "founder"
+            },
+            {
+              "source": "Luckey",
+              "target": "Anduril",
+              "label": "founder"
+            },
+            {
+              "source": "Musk",
+              "target": "SpaceX",
+              "label": "owner"
+            },
+            {
+              "source": "Thiel",
+              "target": "Paypal",
+              "label": "founder"
+            },
+            {
+              "source": "Thiel",
+              "target": "Palantir",
+              "label": "owner"
+            },
+            {
+              "source": "Ellison",
+              "target": "Oracle",
+              "label": "founder"
+            },
+            {
+              "source": "Fink",
+              "target": "Blackrock",
+              "label": "founder"
+            },
+            {
+              "source": "Vance",
+              "target": "Anduril",
+              "label": "investor"
+            },
+            {
+              "source": "Ek",
+              "target": "Helsing",
+              "label": "investor"
+            },
+            {
+              "source": "Ek",
+              "target": "Spotify",
+              "label": "founder"
+            },
+            {
+              "source": "Musk",
+              "target": "Twitter",
+              "label": "owner"
+            },
+            {
+              "source": "Scherf",
+              "target": "Helsing",
+              "label": "owner"
+            },
+            {
+              "source": "Scherf",
+              "target": "McKinsey",
+              "label": "former partner"
+            },
+            {
+              "source": "Reil",
+              "target": "Helsing",
+              "label": "owner"
+            },
+            {
+              "source": "Ek",
+              "target": "Neko",
+              "label": "owner"
+            },
+            {
+              "source": "Ellison",
+              "target": "TikTok",
+              "label": "prospective owner"
+            },
+            {
+              "source": "Rosen",
+              "target": "Meta",
+              "label": "employee"
+            },
+            {
+              "source": "Rosen",
+              "target": "Unit8200",
+              "label": "unit vetran"
+            },
+            {
+              "source": "Rosen",
+              "target": "Onavo",
+              "label": "founder"
+            },
+            {
+              "source": "Rappaport",
+              "target": "Wiz",
+              "label": "founder"
+            },
+            {
+              "source": "Rappaport",
+              "target": "Unit8200",
+              "label": "unit vetran"
+            },
+            {
+              "source": "Karp",
+              "target": "Palantir",
+              "label": "CEO"
+            }
           ],
-          directed: false,
-          metadata: {
-            edge_opacity: 0.25,
-            node_opacity: 0,
-            edge_label_size: 5,
-            node_label_size: 6,
-            node_click: "Details: $hover"
+          "directed": false,
+          "metadata": {
+            "edge_opacity": 0.25,
+            "node_opacity": 0,
+            "edge_label_size": 5,
+            "node_label_size": 6,
+            "node_click": "Details: $hover"
           }
         }
       ];
@@ -77595,6 +79693,7 @@ const state = {
       const nodeIdToObjectMap = state.manager.parseNodes(givenData, parsedData);
       state.manager.parseEdges(givenData, parsedData, nodeIdToObjectMap);
       state.parsedData = parsedData;
+      window.aiwarGraph = parsedData;
       state.currentGraphParts = {};
       ui.elements.graphContainer.style.display = ui.convert.boolToDisplayStyle(true);
       ui.elements.detailsContainer.style.display = ui.convert.boolToDisplayStyle(state.showDetails);
@@ -78633,6 +80732,7 @@ const ui = {
       },
       // Nodes
       createSingleNodeObject(node) {
+        var _a2, _b2;
         let obj = null;
         function createGeometicObject(id2, shape, size, sizeHalf, color2, opacity) {
           const material = new MeshLambertMaterial$1({
@@ -78739,7 +80839,9 @@ const ui = {
         }
         obj.userData.networkNode = true;
         obj.userData.nodeId = node.id;
-        obj.userData.nodeName = node.name;
+        const parsedNode = ((_b2 = (_a2 = state.parsedData) == null ? void 0 : _a2.nodes) == null ? void 0 : _b2.find((n2) => n2.id === node.id)) || null;
+        obj.userData.nodeName = (parsedNode == null ? void 0 : parsedNode.name) || node.label || node.id;
+        obj.userData.nodeData = parsedNode;
         if (state.showNodeLabels && node.label !== "") {
           const sprite = createTextSpriteObject(
             node.id,
@@ -79585,4 +81687,4 @@ window.addEventListener("unload", function() {
   state.threeObjects.disposeAll();
 });
 app.start();
-//# sourceMappingURL=index-BikJgMne.js.map
+//# sourceMappingURL=index-Dopym-8H.js.map
