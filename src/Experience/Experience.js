@@ -60,9 +60,8 @@ export default class Experience {
 
     if (this.debug.active) {
       this.debug.ui.close();
-      if (this.mobileMode) {
-        this.debug.ui.hide();
-      }
+      // Hidden everywhere; bring back with `experience.debug.ui.show()`
+      this.debug.ui.hide();
     }
 
     this.clock = new THREE.Clock();

@@ -33614,9 +33614,7 @@ class Experience {
     this.setupTapSelect();
     if (this.debug.active) {
       this.debug.ui.close();
-      if (this.mobileMode) {
-        this.debug.ui.hide();
-      }
+      this.debug.ui.hide();
     }
     this.clock = new Clock();
     this.clock.start();
@@ -81920,4 +81918,4 @@ window.addEventListener("unload", function() {
   state.threeObjects.disposeAll();
 });
 app.start();
-//# sourceMappingURL=index-C84_3ehg.js.map
+//# sourceMappingURL=index-Di0Bml9b.js.map
