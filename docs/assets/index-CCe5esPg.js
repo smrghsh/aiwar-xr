@@ -33132,13 +33132,8 @@ class World {
   }
 }
 const STYLE = `
-.aiwar-sheet {
+.aiwar-panel {
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 10000;
-  max-height: 60vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   background: #ffffff;
@@ -33146,16 +33141,32 @@ const STYLE = `
   font-family: ui-monospace, Menlo, Consolas, monospace;
   font-size: 13px;
   line-height: 1.45;
-  border-radius: 14px 14px 0 0;
   box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.35);
   padding: 16px 18px calc(16px + env(safe-area-inset-bottom));
-  transform: translateY(105%);
   transition: transform 0.25s ease;
 }
-.aiwar-sheet.aiwar-sheet--open {
-  transform: translateY(0);
+.aiwar-panel--sheet {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10000;
+  max-height: 60vh;
+  border-radius: 14px 14px 0 0;
+  transform: translateY(105%);
 }
-.aiwar-sheet__close {
+.aiwar-panel--side {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 900;
+  width: min(380px, 85vw);
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.35);
+  transform: translateX(105%);
+}
+.aiwar-panel--open {
+  transform: none;
+}
+.aiwar-panel__close {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -33167,17 +33178,18 @@ const STYLE = `
   width: 32px;
   height: 32px;
   border-radius: 16px;
+  cursor: pointer;
 }
-.aiwar-sheet__title {
+.aiwar-panel__title {
   font-size: 17px;
   font-weight: 700;
   margin: 0 36px 2px 0;
 }
-.aiwar-sheet__meta {
+.aiwar-panel__meta {
   color: #555555;
   margin-bottom: 8px;
 }
-.aiwar-sheet__section {
+.aiwar-panel__section {
   color: #666666;
   font-size: 10px;
   font-weight: 700;
@@ -33186,28 +33198,31 @@ const STYLE = `
   border-top: 1px solid #dddddd;
   padding-top: 10px;
 }
-.aiwar-sheet__field {
+.aiwar-panel__field {
   margin: 4px 0;
 }
-.aiwar-sheet__label {
+.aiwar-panel__label {
   font-weight: 700;
 }
-.aiwar-sheet a {
+.aiwar-panel a {
   color: #1a56b0;
 }
 `;
-class MobilePanel {
-  constructor() {
+class InfoPanel {
+  constructor({ variant = "side" } = {}) {
     const style = document.createElement("style");
     style.textContent = STYLE;
     document.head.appendChild(style);
     this.element = document.createElement("div");
-    this.element.className = "aiwar-sheet";
+    this.element.className = `aiwar-panel aiwar-panel--${variant}`;
     document.body.appendChild(this.element);
     this.closeButton = document.createElement("button");
-    this.closeButton.className = "aiwar-sheet__close";
+    this.closeButton.className = "aiwar-panel__close";
     this.closeButton.textContent = "✕";
     this.closeButton.addEventListener("click", () => this.hide());
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") this.hide();
+    });
   }
   _append(parent, tag, className, text) {
     const el = document.createElement(tag);
@@ -33218,8 +33233,8 @@ class MobilePanel {
   }
   _appendField(parent, label2, value) {
     if (!value) return;
-    const field = this._append(parent, "div", "aiwar-sheet__field");
-    this._append(field, "span", "aiwar-sheet__label", `${label2}: `);
+    const field = this._append(parent, "div", "aiwar-panel__field");
+    this._append(field, "span", "aiwar-panel__label", `${label2}: `);
     this._append(field, "span", "", value);
   }
   render(data) {
@@ -33227,7 +33242,7 @@ class MobilePanel {
     const record = (data == null ? void 0 : data.record) || null;
     this.element.replaceChildren(this.closeButton);
     const title = cleanValue(node == null ? void 0 : node.name) || cleanValue(record == null ? void 0 : record.Weapon) || cleanValue(data == null ? void 0 : data.name) || "(unknown)";
-    this._append(this.element, "div", "aiwar-sheet__title", title);
+    this._append(this.element, "div", "aiwar-panel__title", title);
     const metaParts = [
       cleanValue(node == null ? void 0 : node.year),
       cleanValue(node == null ? void 0 : node.currentStatus)
@@ -33236,7 +33251,7 @@ class MobilePanel {
       this._append(
         this.element,
         "div",
-        "aiwar-sheet__meta",
+        "aiwar-panel__meta",
         metaParts.join("  ·  ")
       );
     }
@@ -33249,7 +33264,7 @@ class MobilePanel {
       this._append(
         this.element,
         "div",
-        "aiwar-sheet__section",
+        "aiwar-panel__section",
         "AI WAR CLOUD DATABASE"
       );
       const developed = cleanValue(record.Developed);
@@ -33264,8 +33279,8 @@ class MobilePanel {
       const sourceText = source && sourceType ? `${source} (${sourceType})` : source || sourceType;
       const url = cleanValue(record.URL);
       if (sourceText) {
-        const field = this._append(this.element, "div", "aiwar-sheet__field");
-        this._append(field, "span", "aiwar-sheet__label", "Source: ");
+        const field = this._append(this.element, "div", "aiwar-panel__field");
+        this._append(field, "span", "aiwar-panel__label", "Source: ");
         if (/^https?:\/\//.test(url)) {
           const link = this._append(field, "a", "", `${sourceText} ↗`);
           link.href = url;
@@ -33278,16 +33293,16 @@ class MobilePanel {
     }
     const connections = Array.isArray(data == null ? void 0 : data.connections) ? data.connections : null;
     if (connections == null ? void 0 : connections.length) {
-      this._append(this.element, "div", "aiwar-sheet__section", "CONNECTIONS");
+      this._append(this.element, "div", "aiwar-panel__section", "CONNECTIONS");
       for (const group of connections) {
         this._appendField(this.element, group.label, group.names.join(", "));
       }
     }
     this.element.scrollTop = 0;
-    this.element.classList.add("aiwar-sheet--open");
+    this.element.classList.add("aiwar-panel--open");
   }
   hide() {
-    this.element.classList.remove("aiwar-sheet--open");
+    this.element.classList.remove("aiwar-panel--open");
   }
 }
 const sources = [
@@ -33590,10 +33605,10 @@ class Experience {
     this.world = new World();
     this.statsPanels = new CustomStats();
     this.mobileMode = ((_b2 = (_a2 = window.matchMedia) == null ? void 0 : _a2.call(window, "(pointer: coarse)")) == null ? void 0 : _b2.matches) ?? false;
-    if (this.mobileMode) {
-      this.mobilePanel = new MobilePanel();
-      this.setupTapSelect();
-    }
+    this.infoPanel = new InfoPanel({
+      variant: this.mobileMode ? "sheet" : "side"
+    });
+    this.setupTapSelect();
     if (this.debug.active) {
       this.debug.ui.close();
       if (this.mobileMode) {
@@ -33668,9 +33683,9 @@ class Experience {
       this.raycaster.setFromCamera(this.mouse, this.camera.instance);
       const nodeHit = this.pickNode();
       if (nodeHit) {
-        this.mobilePanel.render(this.assembleNodeData(nodeHit));
+        this.infoPanel.render(this.assembleNodeData(nodeHit));
       } else {
-        this.mobilePanel.hide();
+        this.infoPanel.hide();
       }
     });
   }
@@ -81906,4 +81921,4 @@ window.addEventListener("unload", function() {
   state.threeObjects.disposeAll();
 });
 app.start();
-//# sourceMappingURL=index-CVJdqU0n.js.map
+//# sourceMappingURL=index-CCe5esPg.js.map

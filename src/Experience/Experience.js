@@ -11,7 +11,7 @@ import Mouse from "./Utils/Mouse.js";
 import Camera from "./Camera.js";
 import Renderer from "./Renderer.js";
 import World from "./World/World.js";
-import MobilePanel from "./World/MobilePanel.js";
+import InfoPanel from "./World/InfoPanel.js";
 import sources from "./sources.js";
 import { VRButton } from "three/examples/jsm/webxr/VRButton.js";
 import StatsPanels from "./Utils/StatsPanels.js";
@@ -49,13 +49,14 @@ export default class Experience {
     this.world = new World();
     this.statsPanels = new StatsPanels();
 
-    // Touch devices get tap-to-select + a DOM bottom sheet; XR and desktop
-    // keep the world-space hover tooltip untouched.
+    // Click/tap opens a DOM info panel: bottom sheet on touch devices, side
+    // dock on desktop. Desktop keeps the world-space hover tooltip for quick
+    // scanning; XR is untouched.
     this.mobileMode = window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
-    if (this.mobileMode) {
-      this.mobilePanel = new MobilePanel();
-      this.setupTapSelect();
-    }
+    this.infoPanel = new InfoPanel({
+      variant: this.mobileMode ? "sheet" : "side",
+    });
+    this.setupTapSelect();
 
     if (this.debug.active) {
       this.debug.ui.close();
@@ -146,9 +147,9 @@ export default class Experience {
       this.raycaster.setFromCamera(this.mouse, this.camera.instance);
       const nodeHit = this.pickNode();
       if (nodeHit) {
-        this.mobilePanel.render(this.assembleNodeData(nodeHit));
+        this.infoPanel.render(this.assembleNodeData(nodeHit));
       } else {
-        this.mobilePanel.hide();
+        this.infoPanel.hide();
       }
     });
   }
