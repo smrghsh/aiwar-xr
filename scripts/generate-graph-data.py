@@ -84,6 +84,7 @@ def main():
 
     edges = []
     dropped = []
+    seen_edges = set()
     for sheet in EDGE_SHEETS:
         df = pd.read_excel(sheets, sheet_name=sheet)
         for _, row in df.iterrows():
@@ -93,6 +94,12 @@ def main():
             if src not in nodes or dst not in nodes:
                 dropped.append(f"{sheet}: {src} -> {dst}")
                 continue
+            triple = (src, dst, clean(row.get("label")))
+            if triple in seen_edges:
+                print(f"warning: duplicate edge skipped ({sheet}): "
+                      f"{src} -{triple[2]}-> {dst}")
+                continue
+            seen_edges.add(triple)
             edge = {"source": src, "target": dst}
             label = clean(row.get("label"))
             if label:
@@ -107,23 +114,34 @@ def main():
                 edge["metadata"] = metadata
             edges.append(edge)
 
-    # Node colors: keep existing, infer new ones from colored neighbors
+    # Node colors: drop sidecar ids gone from the graph (renames/deletions),
+    # keep the rest, and infer new ones from colored neighbors — iterated to a
+    # fixpoint so inference is independent of sheet order (a chain of new
+    # nodes colors fully in one run).
+    stale = sorted(set(colors) - set(nodes))
+    for node_id in stale:
+        print(f"warning: dropping color for unknown node id {node_id!r} "
+              "(renamed or removed upstream)")
+        del colors[node_id]
     neighbors = {}
     for edge in edges:
         neighbors.setdefault(edge["source"], []).append(edge["target"])
         neighbors.setdefault(edge["target"], []).append(edge["source"])
-    for node_id, node in nodes.items():
-        color = colors.get(node_id)
-        if not color:
+    changed = True
+    while changed:
+        changed = False
+        for node_id in nodes:
+            if node_id in colors:
+                continue
             counts = Counter(
                 colors[n] for n in neighbors.get(node_id, []) if n in colors
             )
-            color = counts.most_common(1)[0][0] if counts else None
-            if color:
-                colors[node_id] = color
-        if color:
-            node["metadata"]["color"] = color
-    COLORS_PATH.write_text(json.dumps(colors, indent=2, sort_keys=True) + "\n")
+            if counts:
+                colors[node_id] = counts.most_common(1)[0][0]
+                changed = True
+    for node_id, node in nodes.items():
+        if node_id in colors:
+            node["metadata"]["color"] = colors[node_id]
 
     raw_data = [
         {
@@ -145,6 +163,8 @@ def main():
     if count != 1:
         sys.exit("error: could not locate the state.rawData block in src/network.js")
     NETWORK_JS.write_text(updated)
+    # Written only after network.js succeeded so the two files never desync
+    COLORS_PATH.write_text(json.dumps(colors, indent=2, sort_keys=True) + "\n")
 
     print(f"nodes: {len(nodes)}  edges: {len(edges)}  colored: "
           f"{sum(1 for n in nodes.values() if 'color' in n['metadata'])}")

@@ -33095,8 +33095,8 @@ class World {
     const idOf = (ref) => ref && typeof ref === "object" ? ref.id : ref;
     const groups = /* @__PURE__ */ new Map();
     const addTo = (label2, otherId) => {
-      if (!groups.has(label2)) groups.set(label2, []);
-      groups.get(label2).push(this._nodeNames.get(otherId) || otherId);
+      if (!groups.has(label2)) groups.set(label2, /* @__PURE__ */ new Set());
+      groups.get(label2).add(this._nodeNames.get(otherId) || otherId);
     };
     for (const edge of graph2.edges) {
       const source = idOf(edge.source);
@@ -33108,13 +33108,16 @@ class World {
         addTo(INCOMING_LABELS[label2] || `← ${capitalize(label2)}`, source);
       }
     }
-    const connections = Array.from(groups, ([label2, names2]) => ({
-      label: label2,
-      names: names2.length > MAX_CONNECTION_NAMES ? [
-        ...names2.slice(0, MAX_CONNECTION_NAMES),
-        `+${names2.length - MAX_CONNECTION_NAMES} more`
-      ] : names2
-    }));
+    const connections = Array.from(groups, ([label2, nameSet]) => {
+      const names2 = [...nameSet];
+      return {
+        label: label2,
+        names: names2.length > MAX_CONNECTION_NAMES ? [
+          ...names2.slice(0, MAX_CONNECTION_NAMES),
+          `+${names2.length - MAX_CONNECTION_NAMES} more`
+        ] : names2
+      };
+    });
     const result = connections.length ? connections : null;
     this._connectionsCache.set(id2, result);
     return result;
@@ -75517,7 +75520,8 @@ const state = {
                 "militaryUse": "Operations",
                 "civicUse": "SmartHome, Security",
                 "hover": "name: MithraOS; year: 2022; task: Robotics/Navigation; AI type: Automate; Military use: Operations; Civic use: SmartHome, Security",
-                "image": "./assets/noun-bomb-defusing-robot-1036305.png"
+                "image": "./assets/noun-bomb-defusing-robot-1036305.png",
+                "color": "#51DBAB"
               }
             },
             "Donovan": {
@@ -78483,11 +78487,6 @@ const state = {
             {
               "source": "AIP",
               "target": "Venezuela",
-              "label": "used in"
-            },
-            {
-              "source": "Anthropic",
-              "target": "Iran",
               "label": "used in"
             },
             {
@@ -81921,4 +81920,4 @@ window.addEventListener("unload", function() {
   state.threeObjects.disposeAll();
 });
 app.start();
-//# sourceMappingURL=index-CCe5esPg.js.map
+//# sourceMappingURL=index-C84_3ehg.js.map

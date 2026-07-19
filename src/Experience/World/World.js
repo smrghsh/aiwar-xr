@@ -268,8 +268,8 @@ export default class World {
     const idOf = (ref) => (ref && typeof ref === "object" ? ref.id : ref);
     const groups = new Map();
     const addTo = (label, otherId) => {
-      if (!groups.has(label)) groups.set(label, []);
-      groups.get(label).push(this._nodeNames.get(otherId) || otherId);
+      if (!groups.has(label)) groups.set(label, new Set());
+      groups.get(label).add(this._nodeNames.get(otherId) || otherId);
     };
     for (const edge of graph.edges) {
       const source = idOf(edge.source);
@@ -281,16 +281,19 @@ export default class World {
         addTo(INCOMING_LABELS[label] || `← ${capitalize(label)}`, source);
       }
     }
-    const connections = Array.from(groups, ([label, names]) => ({
-      label,
-      names:
-        names.length > MAX_CONNECTION_NAMES
-          ? [
-              ...names.slice(0, MAX_CONNECTION_NAMES),
-              `+${names.length - MAX_CONNECTION_NAMES} more`,
-            ]
-          : names,
-    }));
+    const connections = Array.from(groups, ([label, nameSet]) => {
+      const names = [...nameSet];
+      return {
+        label,
+        names:
+          names.length > MAX_CONNECTION_NAMES
+            ? [
+                ...names.slice(0, MAX_CONNECTION_NAMES),
+                `+${names.length - MAX_CONNECTION_NAMES} more`,
+              ]
+            : names,
+      };
+    });
     const result = connections.length ? connections : null;
     this._connectionsCache.set(id, result);
     return result;

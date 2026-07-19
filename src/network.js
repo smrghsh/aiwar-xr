@@ -1140,7 +1140,8 @@ const state = {
           "militaryUse": "Operations",
           "civicUse": "SmartHome, Security",
           "hover": "name: MithraOS; year: 2022; task: Robotics/Navigation; AI type: Automate; Military use: Operations; Civic use: SmartHome, Security",
-          "image": "./assets/noun-bomb-defusing-robot-1036305.png"
+          "image": "./assets/noun-bomb-defusing-robot-1036305.png",
+          "color": "#51DBAB"
         }
       },
       "Donovan": {
@@ -4106,11 +4107,6 @@ const state = {
       {
         "source": "AIP",
         "target": "Venezuela",
-        "label": "used in"
-      },
-      {
-        "source": "Anthropic",
-        "target": "Iran",
         "label": "used in"
       },
       {
